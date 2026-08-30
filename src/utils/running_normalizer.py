@@ -1,36 +1,16 @@
-"""Running observation normalization.
-
-PPO on continuous-control tasks is usually trained against observations
-normalized to roughly zero mean and unit variance -- without it, a reward or
-gradient scale that happens to suit one observation component can be wrong by
-orders of magnitude for another, and the shared network trunk here has no way
-to correct for that on its own. `RobotReachEnv`'s observation mixes raw
-position and displacement components with no shared scale, so this matters
-concretely, not just in principle.
-
-The mean and variance can't be known in advance -- they depend on the policy
-being trained, which changes what states get visited -- so they're estimated
-online from the same rollouts used for training, with Welford's algorithm
-(the parallel/batch form, so a whole batch of observations can be folded in
-with one call instead of one at a time).
-"""
+"""Running observation normalization with checkpointable statistics."""
 
 import gymnasium as gym
 import numpy as np
 
 
 class RunningMeanStd:
-    """Tracks a running mean and variance over batches of vectors.
-
-    Uses Chan et al.'s parallel variant of Welford's algorithm: merging two
-    summaries (running stats so far, and a new batch) from their counts,
-    means and variances alone, without revisiting old data.
-    """
+    """Track running mean/variance with Chan/Welford batch updates."""
 
     def __init__(self, shape, epsilon: float = 1e-4):
         self.mean = np.zeros(shape, dtype=np.float64)
         self.var = np.ones(shape, dtype=np.float64)
-        self.count = epsilon
+        self.count = float(epsilon)
 
     def update(self, batch: np.ndarray):
         batch = np.asarray(batch, dtype=np.float64)
@@ -40,29 +20,47 @@ class RunningMeanStd:
         batch_mean = batch.mean(axis=0)
         batch_var = batch.var(axis=0)
         batch_count = batch.shape[0]
-
         delta = batch_mean - self.mean
         total_count = self.count + batch_count
-
         new_mean = self.mean + delta * batch_count / total_count
-
         m_a = self.var * self.count
         m_b = batch_var * batch_count
         m2 = m_a + m_b + np.square(delta) * self.count * batch_count / total_count
-
         self.mean = new_mean
         self.var = m2 / total_count
-        self.count = total_count
+        self.count = float(total_count)
+
+    def state_dict(self) -> dict:
+        """Return a copy safe to serialize in a model checkpoint."""
+        return {
+            "mean": self.mean.tolist(),
+            "var": self.var.tolist(),
+            "count": float(self.count),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore statistics, validating their shape and numerical sanity."""
+        mean = np.asarray(state["mean"], dtype=np.float64)
+        var = np.asarray(state["var"], dtype=np.float64)
+        count = float(state["count"])
+        if mean.shape != self.mean.shape or var.shape != self.var.shape:
+            raise ValueError(
+                f"normalizer shape mismatch: checkpoint {mean.shape}, expected {self.mean.shape}"
+            )
+        if not np.all(np.isfinite(mean)) or not np.all(np.isfinite(var)):
+            raise ValueError("normalizer checkpoint contains non-finite statistics")
+        if np.any(var < 0.0) or not np.isfinite(count) or count <= 0.0:
+            raise ValueError("normalizer checkpoint contains invalid variance/count")
+        self.mean = mean.copy()
+        self.var = var.copy()
+        self.count = count
 
 
 class NormalizeObservation(gym.ObservationWrapper):
-    """Gymnasium wrapper that normalizes observations with a running mean/std.
+    """Normalize observations using running statistics.
 
-    Statistics are updated on every observation seen through reset()/step()
-    -- including during evaluation, matching common practice (e.g. Stable-
-    Baselines3's VecNormalize) of letting statistics keep adapting rather than
-    freezing them at an arbitrary point. Pass `update_stats=False` to freeze
-    them, e.g. when replaying a fixed evaluation seed.
+    Training should use ``update_stats=True``. Evaluation should restore the
+    training statistics from the checkpoint and then set ``update_stats=False``.
     """
 
     def __init__(
@@ -84,5 +82,4 @@ class NormalizeObservation(gym.ObservationWrapper):
         normalized = (observation - self.rms.mean) / np.sqrt(
             self.rms.var + self.epsilon
         )
-        normalized = np.clip(normalized, -self.clip, self.clip)
-        return normalized.astype(np.float32)
+        return np.clip(normalized, -self.clip, self.clip).astype(np.float32)

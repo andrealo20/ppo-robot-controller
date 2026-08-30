@@ -641,7 +641,7 @@ diagnostic commits above, so the commit that lands on `main` matching each
 milestone's description is the actual code that produced that milestone's
 results.
 
-### M1.3 status: two real problems found, neither fixed yet, both documented
+### M1.3 historical status: two real problems found before the M1.4 repair
 
 - `tests/test_ppo_ratio_identity.py` has one passing test and one failing
   test, by design: the "clipping is rare" control case
@@ -658,5 +658,65 @@ results.
   case). This is an honest failing test, left failing rather than loosened,
   because the underlying environment behavior is the real problem, not the
   test's expectations.
-- Neither Finding 1 nor Finding 2 has been fixed yet. No new training run
-  has been launched pending a decision on fix order and priorities.
+- At the M1.3 commit, neither Finding 1 nor Finding 2 was fixed. The M1.4 section below records the subsequent repair; no historical M1.3 result is retroactively rewritten.
+
+
+## M1.4: M1.3 findings repaired and pinned by invariants
+
+M1.3 deliberately stopped at diagnosis. M1.4 changes the implementation only
+after the two failures were reproducible.
+
+### Bounded policy: tanh transform, not post-hoc clipping
+
+The actor still parameterizes an unconstrained diagonal Gaussian, but sampled
+latent actions are mapped through `tanh` and then affinely scaled into the
+environment's finite action bounds. PPO evaluates the transformed density,
+including the change-of-variables Jacobian. `select_action()` deliberately
+re-scores the exact float32 bounded action returned to the caller so the
+rollout's stored action and stored log-probability refer to the same random
+variable. `tests/test_ppo_ratio_identity.py` requires the pre-update PPO ratio
+to be one for both low-noise and near-saturated policies, and contains a
+sabotage case that perturbs one old log-probability and verifies the invariant
+fails.
+
+### Static target
+
+The target URDF is now loaded with `useFixedBase=True`. It remains a visible
+PyBullet body but can no longer be pushed by the kinematically driven robot.
+The oracle test is tightened from 95/100 to 100/100 seeds, and an environment
+test checks that the target position does not drift while the robot reaches
+it.
+
+### Evaluation-safe checkpoints
+
+M0-M1.3 saved only `network.state_dict()`, so the running observation mean,
+variance and sample count were lost. The evaluator then froze a fresh
+normalizer at mean=0/variance=1. Those historical held-out percentages are
+therefore not faithful policy evaluations and are retained only as historical
+artifacts. M1.4 checkpoints include network and optimizer state, config,
+training counters and `RunningMeanStd` state. Evaluation restores those stats
+before the first reset and keeps them frozen. Legacy checkpoints can still be
+loaded, but evaluation refuses them by default unless the user explicitly
+opts into the known-invalid normalization fallback.
+
+### Deterministic evaluation and initialization
+
+Evaluation now uses the squashed policy mean by default and exposes stochastic
+sampling only via `--stochastic`. Hidden layers use orthogonal gain `sqrt(2)`,
+the actor output uses `0.01`, and the critic output uses `1.0`; the old code
+used `0.01` for every Linear layer. The state-independent log standard
+deviation starts at -0.5 and is clamped to [-5, 1]. Previous empirical claims
+about the old `log_std=2` ceiling do not transfer to this repaired transformed
+policy.
+
+### Training diagnostics
+
+Each PPO update now returns and TensorBoard logs policy loss, value loss, base
+Gaussian entropy, approximate KL, clip fraction, gradient norm and mean policy
+standard deviation. Non-finite loss or gradient norm raises immediately rather
+than silently poisoning later updates.
+
+No M1.4 convergence claim is made until a fresh training run is executed on
+this corrected implementation. The appropriate sequence is oracle sanity
+check, small/fixed-target overfit diagnostic if needed, then full random-target
+training.

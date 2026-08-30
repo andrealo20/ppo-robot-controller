@@ -46,10 +46,9 @@ def test_oracle_controller_reaches_the_target_reliably():
     finally:
         env.close()
 
-    # Not 100%: a target can land extremely close to the origin, or exactly
-    # on a workspace/precision edge case. A hand-coded, always-correct-
-    # direction controller should still resolve the large majority.
-    assert successes / n_seeds >= 0.95, (
+    # The target is fixed-base: a correct-direction oracle must solve every
+    # sampled target in this bounded workspace.
+    assert successes == n_seeds, (
         f"only {successes}/{n_seeds} resolved -- the environment itself may "
         f"not be reliably solvable, independent of PPO"
     )

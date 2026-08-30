@@ -102,3 +102,41 @@ def test_action_is_not_mutated_by_step(env):
     env.step(action)
 
     assert np.array_equal(action, action_copy)
+
+
+def test_target_does_not_move_when_robot_reaches_it(env):
+    """The reaching target is a landmark, not a pushable dynamic object."""
+    obs, _ = env.reset(seed=7)
+    target_before = obs[2:4].copy()
+    terminated = truncated = False
+    while not (terminated or truncated):
+        delta = obs[4:6]
+        norm = np.linalg.norm(delta)
+        action = (
+            np.zeros(2, dtype=np.float32)
+            if norm < 1e-8
+            else (delta / norm).astype(np.float32)
+        )
+        obs, _, terminated, truncated, _ = env.step(action)
+    target_after = obs[2:4]
+    assert np.allclose(target_after, target_before, atol=1e-6)
+
+
+def test_reset_seed_reproduces_random_target():
+    env = RobotReachEnv(render_mode=None)
+    try:
+        obs_a, _ = env.reset(seed=123)
+        obs_b, _ = env.reset(seed=123)
+        assert np.array_equal(obs_a[2:4], obs_b[2:4])
+    finally:
+        env.close()
+
+
+def test_fixed_target_mode_is_exact_and_repeatable():
+    env = RobotReachEnv(render_mode=None, fixed_target=(0.4, -0.3))
+    try:
+        for seed in (0, 1, 999):
+            obs, _ = env.reset(seed=seed)
+            assert np.allclose(obs[2:4], [0.4, -0.3], atol=1e-7)
+    finally:
+        env.close()

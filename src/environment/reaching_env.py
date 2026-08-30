@@ -43,13 +43,25 @@ class RobotReachEnv(gym.Env):
 
     metadata: ClassVar[dict] = {"render_modes": ["human"], "render_fps": 60}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, fixed_target=None):
         """Initialize reaching environment.
 
         Args:
-            render_mode: "human" for visualization or None
+            render_mode: "human" for visualization or None.
+            fixed_target: Optional (x, y) target used for overfit diagnostics.
+                If omitted, reset() samples uniformly from [-1, 1]^2.
         """
         self.render_mode = render_mode
+        self.fixed_target = None
+        if fixed_target is not None:
+            fixed_target = np.asarray(fixed_target, dtype=np.float64)
+            if fixed_target.shape != (2,) or not np.all(np.isfinite(fixed_target)):
+                raise ValueError("fixed_target must contain two finite coordinates")
+            if np.any(np.abs(fixed_target) > 1.0):
+                raise ValueError(
+                    "fixed_target must lie inside the target sampling range [-1, 1]^2"
+                )
+            self.fixed_target = fixed_target.copy()
         self.client = None
         self.robot_id = None
         self.target_id = None
@@ -75,7 +87,10 @@ class RobotReachEnv(gym.Env):
             self.plane_id = p.loadURDF("plane.urdf")
             self.robot_id = p.loadURDF("r2d2.urdf", [0, 0, 1], useFixedBase=True)
             self.target_id = p.loadURDF(
-                "sphere_small.urdf", [1, 1, 1], globalScaling=0.2
+                "sphere_small.urdf",
+                [1, 1, 1],
+                globalScaling=0.2,
+                useFixedBase=True,
             )
 
     def reset(self, seed=None, options=None):
@@ -85,9 +100,13 @@ class RobotReachEnv(gym.Env):
         if self.client is None:
             self._setup_physics()
 
-        # Random target position
-        target_pos = self.np_random.uniform(-1, 1, 3)
-        target_pos[2] = 1.0
+        # Static target position. Fixed-target mode is useful for the cheap
+        # "can PPO overfit one goal?" diagnostic before a full random-target run.
+        if self.fixed_target is None:
+            target_xy = self.np_random.uniform(-1.0, 1.0, 2)
+        else:
+            target_xy = self.fixed_target
+        target_pos = np.array([target_xy[0], target_xy[1], 1.0], dtype=np.float64)
         p.resetBasePositionAndOrientation(self.target_id, target_pos, [0, 0, 0, 1])
 
         # Robot reset

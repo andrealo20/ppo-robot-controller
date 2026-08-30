@@ -94,3 +94,46 @@ def test_update_with_epochs_zero_still_clears_buffer():
     agent.update(next_value=0.0, epochs=0)
 
     assert agent.states == []
+
+
+def test_deterministic_action_is_repeatable_and_bounded():
+    obs_space, action_space = make_spaces()
+    agent = PPOAgent(obs_space, action_space)
+    state = np.array([0.3, -0.2, 0.5, 0.1, 0.2, 0.3], dtype=np.float32)
+
+    action_a, _ = agent.select_action(state, deterministic=True)
+    action_b, _ = agent.select_action(state, deterministic=True)
+
+    assert np.array_equal(action_a, action_b)
+    assert np.all(action_a >= action_space.low)
+    assert np.all(action_a <= action_space.high)
+
+
+def test_checkpoint_restores_normalizer_and_optimizer(tmp_path):
+    from src.utils.running_normalizer import RunningMeanStd
+
+    obs_space, action_space = make_spaces()
+    agent = PPOAgent(obs_space, action_space, config={"lr": 3e-4})
+    rms = RunningMeanStd(shape=obs_space.shape)
+    rms.update(np.arange(60, dtype=np.float64).reshape(10, 6))
+
+    checkpoint = tmp_path / "complete.pt"
+    agent.save(
+        checkpoint,
+        observation_rms=rms,
+        config={"lr": 3e-4, "tag": "test"},
+        training_state={"total_steps": 123},
+    )
+
+    reloaded = PPOAgent(obs_space, action_space, config={"lr": 3e-4})
+    restored_rms = RunningMeanStd(shape=obs_space.shape)
+    metadata = reloaded.load(
+        checkpoint, observation_rms=restored_rms, load_optimizer=True
+    )
+
+    assert metadata["normalizer_restored"] is True
+    assert metadata["training_state"]["total_steps"] == 123
+    assert metadata["config"]["tag"] == "test"
+    assert np.array_equal(restored_rms.mean, rms.mean)
+    assert np.array_equal(restored_rms.var, rms.var)
+    assert restored_rms.count == rms.count

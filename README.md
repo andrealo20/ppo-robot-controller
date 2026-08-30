@@ -3,8 +3,8 @@
 [![CI](https://github.com/andrealo20/ppo-robot-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/andrealo20/ppo-robot-controller/actions/workflows/ci.yml)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 [![language: Python 3.10+](https://img.shields.io/badge/language-Python%203.10%2B-blue.svg)](requirements.txt)
-[![tests: 32, 2 red](https://img.shields.io/badge/tests-32%20(2%20red)-red.svg)](tests/)
-[![status: M1.3 investigating](https://img.shields.io/badge/status-M1.3%20investigating-red.svg)](docs/design.md)
+[![tests: 39](https://img.shields.io/badge/tests-39-blue.svg)](tests/)
+[![status: M1.4 fixes implemented](https://img.shields.io/badge/status-M1.4%20fixes%20implemented-brightgreen.svg)](docs/design.md)
 
 **A from-scratch PPO implementation (PyTorch, no RL library) for a PyBullet
 reaching task, with a hand-derived GAE bootstrap tested against an
@@ -13,38 +13,29 @@ with minibatched updates, and a workspace bound verified by sabotage.**
 
 ## Status
 
-**Update, M1.3 (in progress):** an independent review of this repository
-found two real problems the three disproved hypotheses below never could:
-(1) `select_action()` computes the PPO log-probability on the raw sampled
-action but stores and later re-scores the *clipped* one -- confirmed by a
-new test that measures the PPO ratio before any gradient step and finds it
-should be 1.0 but reaches values up to 473 when std is at the trained
-ceiling; (2) the reaching target is a normal dynamic rigid body, not a
-fixed marker, and the kinematically-overridden robot can physically shove it
-out of reach on contact -- confirmed by a new hand-coded oracle-controller
-test that fails 5/100 seeds for exactly this reason, and shows target drift
-of up to 0.7m even in episodes that do succeed. The public GitHub `main`
-branch was also found to never have actually received the M1/M1.1/M1.2
-source changes (only the documentation did) -- being corrected alongside
-this update. See `docs/design.md`, "M1.3", for the full trace and numbers.
-Neither problem is fixed yet; no conclusions below account for them.
+**M1.4 fixes the two end-to-end defects isolated in M1.3.** The policy now
+uses a tanh-squashed Gaussian instead of sampling an unbounded Gaussian and
+then clipping the action after computing its log-probability. The action
+actually stored in the rollout is therefore the same bounded action whose
+likelihood PPO re-scores; a ratio-identity test checks that
+`exp(log_pi_new(a) - log_pi_old(a)) == 1` before any optimizer step, including
+near saturated action bounds. The PyBullet target is now fixed-base, so the
+kinematically driven robot cannot shove it out of the workspace; the
+hand-coded oracle is required to solve all 100 deterministic seeds.
 
-Honestly not converged, across seven separate real training runs. Multi-episode
-rollouts, minibatching, and a hard workspace bound are all implemented and
-tested; training runs stably end to end; real training curves and real
-held-out evaluations exist throughout. None of it has produced an agent that
-reliably reaches the target: **2-8% success rate depending on the run, no
-improving trend in any of them — including a run 3x longer than the rest,
-run specifically to test whether more training was the missing piece.**
-`docs/design.md` records the full story, including three specific, testable
-hypotheses for the plateau (a saturated policy noise parameter, then an
-unbounded workspace, then too small a training budget) that were each tested
-against real curves and disproved — a targeted fix for each of the first two
-was tried and made things measurably *worse*, and the third (running 3x
-longer) simply produced a flat curve, not a rising one. What is left
-untested is a much larger budget still (roughly another order of magnitude),
-or a limitation none of these three hypotheses targeted at all: reward
-shaping, network capacity, or the action scale relative to the workspace.
+Checkpointing is also evaluation-safe now: network weights, optimizer state,
+configuration, training progress, and observation-normalizer statistics are
+saved together. Evaluation restores those statistics, freezes them, and is
+deterministic by default (`--stochastic` is explicit). Legacy M0-M1.3
+network-only checkpoints are still loadable, but `src.evaluate` rejects them
+by default because their training normalization statistics were never saved.
+
+The seven historical M0-M1.2 training runs remain documented as negative
+results, but their held-out success percentages should **not** be treated as
+valid measurements of the trained policies: the old evaluator used fresh,
+frozen normalization statistics instead of the training statistics. No new
+claim of convergence is made here; the correct next experiment is a fresh
+M1.4 training run after this repaired implementation passes CI.
 
 ## Milestones
 
@@ -83,6 +74,15 @@ shaping, network capacity, or the action scale relative to the workspace.
   not track the (larger, more reliable) training-curve trend, which shows no
   improvement. A much larger budget (another order of magnitude) remains
   untested and unruled-out.
+- **M1.4 — repair the end-to-end policy/environment/evaluation contract.**
+  Replaced post-hoc action clipping with a tanh-squashed Gaussian and corrected
+  the transformed log-probability, made the target static, added ratio-identity
+  sabotage coverage, made checkpoints restore observation normalization, made
+  evaluation deterministic by default, switched to head-specific PPO-style
+  orthogonal initialization, and added PPO diagnostics (KL, clip fraction,
+  entropy, gradient norm, policy std) to TensorBoard. Historical held-out
+  evaluations are explicitly marked non-comparable because their normalizer
+  statistics were not saved.
 
 ## How it works
 
@@ -140,6 +140,9 @@ why these specific values, and which ones were tried and rejected):
 python -m src.train --num-episodes 3000 --lr 1e-4 --rollout-steps 2048 --minibatch-size 64
 python -m src.evaluate --model-path experiments/checkpoints/best_model.pt --episodes 50 --seed 1000
 python -m pytest tests -q
+
+# Cheap overfit diagnostic on one fixed goal before a full run
+python -m src.train --num-episodes 500 --fixed-target 0.6 0.4 --output-dir experiments/fixed_target
 ```
 
 ## Repository layout
@@ -153,7 +156,7 @@ src/
 ├── train.py        training entry point + collect_rollout (python -m src.train)
 └── evaluate.py      evaluation entry point (python -m src.evaluate)
 
-tests/              29 tests: GAE reference + multi-episode leak + mutation
+tests/              39 tests: GAE reference + multi-episode leak + mutation
                     checks, rollout collection bookkeeping, network clamp,
                     agent smoke tests, environment terminated/truncated
                     contract + workspace bound, running normalizer

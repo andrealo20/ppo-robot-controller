@@ -1,4 +1,9 @@
-"""PPO Agent implementation."""
+"""Proximal Policy Optimization agent for bounded continuous actions."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -8,47 +13,39 @@ from src.network.policy_value import PolicyValueNetwork
 
 
 class PPOAgent:
-    """Proximal Policy Optimization agent."""
+    """PPO with a tanh-squashed diagonal Gaussian policy."""
+
+    _ACTION_EPS = 1e-6
+    CHECKPOINT_VERSION = 2
 
     def __init__(self, observation_space, action_space, config=None):
-        """Initialize PPO agent.
-
-        Args:
-            observation_space: Gymnasium observation space
-            action_space: Gymnasium action space
-            config: Configuration dict
-        """
         self.observation_space = observation_space
         self.action_space = action_space
+        self.config = dict(config or {})
 
-        # Hyperparameters
-        self.lr = config.get("lr", 1e-4) if config else 1e-4
-        self.gamma = config.get("gamma", 0.99) if config else 0.99
-        self.gae_lambda = config.get("gae_lambda", 0.95) if config else 0.95
-        self.eps_clip = config.get("eps_clip", 0.2) if config else 0.2
-        self.value_coef = config.get("value_coef", 0.5) if config else 0.5
-        self.entropy_coef = config.get("entropy_coef", 0.01) if config else 0.01
+        self.lr = self.config.get("lr", 1e-4)
+        self.gamma = self.config.get("gamma", 0.99)
+        self.gae_lambda = self.config.get("gae_lambda", 0.95)
+        self.eps_clip = self.config.get("eps_clip", 0.2)
+        self.value_coef = self.config.get("value_coef", 0.5)
+        self.entropy_coef = self.config.get("entropy_coef", 0.01)
+        self.max_grad_norm = self.config.get("max_grad_norm", 0.5)
 
-        # Device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Network
         self.network = PolicyValueNetwork(
             obs_dim=observation_space.shape[0], action_dim=action_space.shape[0]
         ).to(self.device)
-
         self.optimizer = optim.Adam(self.network.parameters(), lr=self.lr)
 
-        # Rollout buffer. May span multiple episodes (see docs/design.md,
-        # "Multi-episode rollouts"): `episode_end[t]` is True whenever
-        # transition t is the LAST transition of its episode, for any reason
-        # (task resolved OR the environment's step budget ran out).
-        # `terminated[t]` narrows that further to "resolved" specifically --
-        # only meaningful when episode_end[t] is True. `boundary_value[t]` is
-        # the bootstrap value to use at a truncation boundary (V(next_state),
-        # computed by the caller at collection time); it is unused --
-        # ignored -- everywhere episode_end[t] is False or terminated[t] is
-        # True.
+        low = np.asarray(action_space.low, dtype=np.float32)
+        high = np.asarray(action_space.high, dtype=np.float32)
+        if not np.all(np.isfinite(low)) or not np.all(np.isfinite(high)):
+            raise ValueError("PPOAgent requires finite continuous action bounds")
+        if np.any(high <= low):
+            raise ValueError("each action-space high bound must exceed its low bound")
+        self._action_bias = torch.as_tensor((high + low) / 2.0, device=self.device)
+        self._action_scale = torch.as_tensor((high - low) / 2.0, device=self.device)
+
         self.states = []
         self.actions = []
         self.rewards = []
@@ -58,27 +55,61 @@ class PPOAgent:
         self.episode_end = []
         self.boundary_value = []
 
-    def select_action(self, state: np.ndarray) -> tuple[np.ndarray, float]:
-        """Select action from current state.
+    def _distribution(self, states: torch.Tensor):
+        means, stds, values = self.network(states)
+        return torch.distributions.Normal(means, stds), values
 
-        Args:
-            state: Current observation
+    def _squash(self, raw_action: torch.Tensor) -> torch.Tensor:
+        return self._action_bias + self._action_scale * torch.tanh(raw_action)
 
-        Returns:
-            action, log_prob
-        """
+    def _unsquash(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        unit = (action - self._action_bias) / self._action_scale
+        unit = torch.clamp(unit, -1.0 + self._ACTION_EPS, 1.0 - self._ACTION_EPS)
+        raw = torch.atanh(unit)
+        return raw, unit
+
+    def _log_prob_from_dist(
+        self, dist: torch.distributions.Normal, action: torch.Tensor
+    ) -> torch.Tensor:
+        """Log probability of the bounded action under the transformed policy."""
+        raw, unit = self._unsquash(action)
+        base_log_prob = dist.log_prob(raw)
+        # y = bias + scale * tanh(x), so |dy/dx| = scale * (1 - tanh(x)^2).
+        log_abs_det = torch.log(self._action_scale) + torch.log(
+            torch.clamp(1.0 - unit.square(), min=self._ACTION_EPS)
+        )
+        return (base_log_prob - log_abs_det).sum(-1)
+
+    def evaluate_actions(self, states: torch.Tensor, actions: torch.Tensor):
+        """Evaluate stored bounded actions under the current policy."""
+        dist, values = self._distribution(states)
+        log_probs = self._log_prob_from_dist(dist, actions)
+        # Base-Gaussian entropy is a stable exploration proxy for the squashed
+        # policy; the exact transformed entropy has no simple closed form.
+        entropy = dist.entropy().sum(-1)
+        return log_probs, entropy, values
+
+    def select_action(
+        self, state: np.ndarray, deterministic: bool = False
+    ) -> tuple[np.ndarray, float]:
+        """Return a bounded environment action and its matching log-probability."""
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            mean, std, _value = self.network(state_tensor)
+            state_tensor = torch.as_tensor(
+                state, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+            dist, _ = self._distribution(state_tensor)
+            raw_action = dist.mean if deterministic else dist.sample()
+            action_tensor = self._squash(raw_action)
 
-            dist = torch.distributions.Normal(mean, std)
-            action = dist.sample()
-            log_prob = dist.log_prob(action).sum(-1)
-
-            action = action.cpu().numpy().squeeze()
-            log_prob = log_prob.cpu().item()
-
-        return np.clip(action, -1.0, 1.0), log_prob
+            # Round-trip through numpy first, then score exactly the action that
+            # the caller receives/stores. This preserves the PPO ratio identity
+            # even for saturated float32 tanh outputs near +/-1.
+            action = action_tensor.squeeze(0).cpu().numpy().astype(np.float32)
+            returned_action = torch.as_tensor(
+                action, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
+            log_prob = self._log_prob_from_dist(dist, returned_action).item()
+        return action, float(log_prob)
 
     def store_transition(
         self,
@@ -91,26 +122,8 @@ class PPOAgent:
         truncated=False,
         boundary_value=0.0,
     ):
-        """Store one environment transition in the rollout buffer.
-
-        Args:
-            terminated: True only if this transition ended its episode by
-                resolving the task. A transition that ends its episode purely
-                because the step limit was reached (Gymnasium's `truncated`)
-                must be passed here as terminated=False -- exactly as
-                env.step()'s (terminated, truncated) pair keeps them apart.
-            truncated: True only if this transition ended its episode by
-                running out of the step budget. `terminated` and `truncated`
-                must never both be True (Gymnasium's own contract).
-            boundary_value: Required (and only meaningful) when
-                truncated=True: V(the real next state), i.e. the critic's own
-                estimate of what happens after this transition, computed by
-                the caller *before* the environment is reset for the next
-                episode. Ignored when truncated=False.
-        """
         if terminated and truncated:
             raise ValueError("a transition cannot be both terminated and truncated")
-
         self.states.append(state)
         self.actions.append(action)
         self.rewards.append(reward)
@@ -121,24 +134,6 @@ class PPOAgent:
         self.boundary_value.append(boundary_value if truncated else 0.0)
 
     def compute_returns_and_advantages(self, next_value):
-        """Compute returns and GAE advantages over the whole rollout buffer.
-
-        The buffer may contain several episodes back to back (see
-        docs/design.md). At every `episode_end[t]`, the GAE recursion is cut
-        (the advantage of whatever episode comes after t must never leak
-        backward into t's episode) and the TD bootstrap is either 0.0 (a true
-        termination) or the precomputed `boundary_value[t]` (a truncation).
-        Everywhere else -- including the very last buffer transition, if its
-        episode is still ongoing -- behaves exactly like the original
-        single-episode recursion, bootstrapping from `next_value`.
-
-        Args:
-            next_value: Bootstrap value for the state *after* the last stored
-                transition, used only if that transition is not itself an
-                episode_end (i.e. the rollout was cut off mid-episode purely
-                because the buffer reached its step budget, not because the
-                episode ended). Ignored otherwise.
-        """
         returns = []
         advantages = []
         gae = 0.0
@@ -148,7 +143,7 @@ class PPOAgent:
             if self.episode_end[t]:
                 bootstrap = 0.0 if self.terminated[t] else self.boundary_value[t]
                 next_non_terminal = 0.0 if self.terminated[t] else 1.0
-                gae_continues = 0.0  # always cut the recursion at an episode end
+                gae_continues = 0.0
             elif t == n - 1:
                 bootstrap = next_value
                 next_non_terminal = 1.0
@@ -164,49 +159,38 @@ class PPOAgent:
                 - self.values[t]
             )
             gae = delta + self.gamma * self.gae_lambda * gae_continues * gae
-
             advantages.insert(0, gae)
             returns.insert(0, gae + self.values[t])
 
-        return torch.FloatTensor(returns), torch.FloatTensor(advantages)
+        return torch.tensor(returns, dtype=torch.float32), torch.tensor(
+            advantages, dtype=torch.float32
+        )
 
-    def update(self, next_value, epochs=3, minibatch_size=None):
-        """Update policy and value network on the current rollout buffer.
+    def update(self, next_value, epochs=3, minibatch_size=None) -> dict[str, float]:
+        """Run PPO epochs and return aggregate diagnostics for logging."""
+        if not self.states:
+            return {}
 
-        Args:
-            next_value: See compute_returns_and_advantages.
-            epochs: Number of passes over the rollout.
-            minibatch_size: If given, each epoch shuffles the rollout and
-                splits it into minibatches of this size (the last one may be
-                smaller). If None (default), each epoch is a single full-batch
-                gradient step over the whole rollout -- the original M0
-                behaviour, kept as the default so existing single-episode
-                callers (and their tests) are unaffected.
-        """
-        # Compute returns and advantages
         returns, advantages = self.compute_returns_and_advantages(next_value)
-
-        # Normalize advantages once, over the whole rollout, before any
-        # minibatching -- standard practice (splitting first would let small
-        # minibatches skew each other's normalization). unbiased=False
-        # deliberately: torch's default (Bessel-corrected) std of a
-        # single-element tensor is 0/0 = NaN -- a one-transition rollout (a
-        # legal, if unusual, edge case) would silently poison the whole
-        # update. The biased std of one element is exactly 0, which + 1e-8
-        # leaves that one advantage at 0 after normalization: inert, not NaN.
         advantages = (advantages - advantages.mean()) / (
             advantages.std(unbiased=False) + 1e-8
         )
 
-        # Convert to tensors
-        states = torch.FloatTensor(np.array(self.states)).to(self.device)
-        actions = torch.FloatTensor(np.array(self.actions)).to(self.device)
-        old_log_probs = torch.FloatTensor(self.log_probs).to(self.device)
+        states = torch.as_tensor(
+            np.asarray(self.states), dtype=torch.float32, device=self.device
+        )
+        actions = torch.as_tensor(
+            np.asarray(self.actions), dtype=torch.float32, device=self.device
+        )
+        old_log_probs = torch.as_tensor(
+            self.log_probs, dtype=torch.float32, device=self.device
+        )
         returns = returns.to(self.device)
         advantages = advantages.to(self.device)
 
         n = states.shape[0]
         batch_size = n if minibatch_size is None else min(minibatch_size, n)
+        metric_rows: list[dict[str, float]] = []
 
         for _ in range(epochs):
             indices = (
@@ -214,42 +198,66 @@ class PPOAgent:
             )
             for start in range(0, n, batch_size):
                 idx = indices[start : start + batch_size]
-                self._gradient_step(
-                    states[idx],
-                    actions[idx],
-                    old_log_probs[idx],
-                    returns[idx],
-                    advantages[idx],
+                metric_rows.append(
+                    self._gradient_step(
+                        states[idx],
+                        actions[idx],
+                        old_log_probs[idx],
+                        returns[idx],
+                        advantages[idx],
+                    )
                 )
 
-        # Clear buffer
         self.clear_buffer()
+        if not metric_rows:
+            return {}
+        return {
+            key: float(np.mean([row[key] for row in metric_rows]))
+            for key in metric_rows[0]
+        }
 
     def _gradient_step(self, states, actions, old_log_probs, returns, advantages):
-        """One PPO gradient step on a (mini)batch."""
-        means, stds, values = self.network(states)
-
-        dist = torch.distributions.Normal(means, stds)
-        new_log_probs = dist.log_prob(actions).sum(-1)
-        ratio = torch.exp(new_log_probs - old_log_probs)
+        new_log_probs, entropy_per_sample, values = self.evaluate_actions(
+            states, actions
+        )
+        log_ratio = new_log_probs - old_log_probs
+        ratio = torch.exp(log_ratio)
 
         surr1 = ratio * advantages
         surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
         policy_loss = -torch.min(surr1, surr2).mean()
-
         value_loss = ((values.squeeze(-1) - returns) ** 2).mean()
-
-        entropy = dist.entropy().sum(-1).mean()
-
+        entropy = entropy_per_sample.mean()
         loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+
+        if not torch.isfinite(loss):
+            raise FloatingPointError("non-finite PPO loss")
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.network.parameters(), self.max_grad_norm
+        )
+        if not torch.isfinite(grad_norm):
+            raise FloatingPointError("non-finite PPO gradient norm")
         self.optimizer.step()
 
+        with torch.no_grad():
+            approx_kl = ((ratio - 1.0) - log_ratio).mean()
+            clip_fraction = ((ratio - 1.0).abs() > self.eps_clip).float().mean()
+        return {
+            "policy_loss": policy_loss.item(),
+            "value_loss": value_loss.item(),
+            "entropy": entropy.item(),
+            "approx_kl": approx_kl.item(),
+            "clip_fraction": clip_fraction.item(),
+            "grad_norm": float(grad_norm.item()),
+            "policy_std": float(
+                torch.exp(torch.clamp(self.network.log_std, -5.0, 1.0)).mean().item()
+            ),
+        }
+
     def clear_buffer(self):
-        """Clear rollout buffer."""
         self.states.clear()
         self.actions.clear()
         self.rewards.clear()
@@ -260,16 +268,61 @@ class PPOAgent:
         self.boundary_value.clear()
 
     def get_value(self, state: np.ndarray) -> float:
-        """Get value estimate for state."""
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            state_tensor = torch.as_tensor(
+                state, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
             _, _, value = self.network(state_tensor)
-        return value.cpu().item()
+        return float(value.item())
 
-    def save(self, path):
-        """Save model checkpoint."""
-        torch.save(self.network.state_dict(), path)
+    def save(
+        self,
+        path,
+        observation_rms=None,
+        config: dict[str, Any] | None = None,
+        training_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Save a complete, evaluation-safe training checkpoint."""
+        checkpoint = {
+            "checkpoint_version": self.CHECKPOINT_VERSION,
+            "network_state_dict": self.network.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "config": dict(self.config if config is None else config),
+            "training_state": dict(training_state or {}),
+            "normalizer_state": (
+                observation_rms.state_dict() if observation_rms is not None else None
+            ),
+        }
+        torch.save(checkpoint, Path(path))
 
-    def load(self, path):
-        """Load model checkpoint."""
-        self.network.load_state_dict(torch.load(path, map_location=self.device))
+    def load(self, path, observation_rms=None, load_optimizer: bool = False) -> dict:
+        """Load checkpoint; legacy network-only ``state_dict`` files still work."""
+        payload = torch.load(Path(path), map_location=self.device)
+        if isinstance(payload, dict) and "network_state_dict" in payload:
+            self.network.load_state_dict(payload["network_state_dict"])
+            if load_optimizer and payload.get("optimizer_state_dict") is not None:
+                self.optimizer.load_state_dict(payload["optimizer_state_dict"])
+            restored = False
+            if (
+                observation_rms is not None
+                and payload.get("normalizer_state") is not None
+            ):
+                observation_rms.load_state_dict(payload["normalizer_state"])
+                restored = True
+            return {
+                "checkpoint_version": payload.get("checkpoint_version", 1),
+                "config": payload.get("config", {}),
+                "training_state": payload.get("training_state", {}),
+                "normalizer_restored": restored,
+                "legacy": False,
+            }
+
+        # M0-M1.3 compatibility: those checkpoints contained only state_dict.
+        self.network.load_state_dict(payload)
+        return {
+            "checkpoint_version": 0,
+            "config": {},
+            "training_state": {},
+            "normalizer_restored": False,
+            "legacy": True,
+        }

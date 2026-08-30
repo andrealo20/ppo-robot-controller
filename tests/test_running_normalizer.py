@@ -82,3 +82,17 @@ def test_frozen_stats_do_not_update():
         env.step(np.zeros(1, dtype=np.float32))
 
     assert env.rms.count == count_before
+
+
+def test_running_mean_std_state_dict_round_trip():
+    rng = np.random.default_rng(42)
+    data = rng.normal(size=(128, 2))
+    original = RunningMeanStd(shape=(2,))
+    original.update(data)
+
+    restored = RunningMeanStd(shape=(2,))
+    restored.load_state_dict(original.state_dict())
+
+    assert np.array_equal(restored.mean, original.mean)
+    assert np.array_equal(restored.var, original.var)
+    assert restored.count == original.count

@@ -110,7 +110,9 @@ def train(config):
     writer = SummaryWriter(log_dir=output_dir / "logs")
 
     # Environment
-    env = NormalizeObservation(RobotReachEnv(render_mode=None))
+    env = NormalizeObservation(
+        RobotReachEnv(render_mode=None, fixed_target=config.get("fixed_target"))
+    )
 
     # Agent
     agent = PPOAgent(
@@ -132,17 +134,29 @@ def train(config):
         )
         total_steps += config["rollout_steps"]
 
-        agent.update(
+        metrics = agent.update(
             next_value,
             epochs=config["ppo_epochs"],
             minibatch_size=config["minibatch_size"],
         )
+        for name, value in metrics.items():
+            writer.add_scalar(f"ppo/{name}", value, update_idx + 1)
 
         for ep_reward in episode_rewards:
             total_episodes += 1
             if ep_reward > best_reward:
                 best_reward = ep_reward
-                agent.save(output_dir / "best_model.pt")
+                agent.save(
+                    output_dir / "best_model.pt",
+                    observation_rms=env.rms,
+                    config=config,
+                    training_state={
+                        "total_steps": total_steps,
+                        "total_episodes": total_episodes,
+                        "update_idx": update_idx + 1,
+                        "best_reward": best_reward,
+                    },
+                )
 
             if total_episodes % config["log_interval"] == 0:
                 print(
@@ -152,7 +166,17 @@ def train(config):
             writer.add_scalar("reward/episode", ep_reward, total_episodes)
 
         if (update_idx + 1) % config["checkpoint_interval"] == 0:
-            agent.save(output_dir / f"model_update{update_idx + 1}.pt")
+            agent.save(
+                output_dir / f"model_update{update_idx + 1}.pt",
+                observation_rms=env.rms,
+                config=config,
+                training_state={
+                    "total_steps": total_steps,
+                    "total_episodes": total_episodes,
+                    "update_idx": update_idx + 1,
+                    "best_reward": best_reward,
+                },
+            )
 
         if total_episodes >= config["num_episodes"]:
             break
@@ -192,6 +216,14 @@ def build_arg_parser():
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--checkpoint-interval", type=int, default=20)
     parser.add_argument("--output-dir", type=str, default="experiments/checkpoints")
+    parser.add_argument(
+        "--fixed-target",
+        type=float,
+        nargs=2,
+        metavar=("X", "Y"),
+        default=None,
+        help="Use one fixed target for a cheap PPO overfit diagnostic before full training.",
+    )
     return parser
 
 
