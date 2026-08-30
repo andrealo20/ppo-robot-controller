@@ -16,8 +16,8 @@ updates, and a workspace bound verified by sabotage.**
 
 On the full random-target task (target sampled uniformly from
 `[-1, 1] x [-1, 1]` each episode), a held-out evaluation of the trained
-policy — deterministic actions, frozen observation-normalizer statistics,
-50 episodes, seed 1000 — resolves **42/50 episodes (84%)**, mean reward
+policy (deterministic actions, frozen observation-normalizer statistics,
+50 episodes, seed 1000) resolves **42/50 episodes (84%)**, mean reward
 -49.70 +/- 74.13. The variance is driven by two hard episodes (likely far
 corner targets); the other 48 cluster between roughly -40 and +7.
 
@@ -143,8 +143,6 @@ assets/             reaching_env.png, training_reward_fixed_target.png,
 ```
 
 ## Limitations
-
-Stated here rather than left to be discovered.
 
 - **The task is not solved outright.** 84% held-out success (42/50, seed
   1000) on one 3000-episode run is a real result, not a guarantee — 16% of
