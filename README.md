@@ -4,113 +4,35 @@
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 [![language: Python 3.10+](https://img.shields.io/badge/language-Python%203.10%2B-blue.svg)](requirements.txt)
 [![tests: 39](https://img.shields.io/badge/tests-39-blue.svg)](tests/)
-[![status: M1.4 fixes implemented](https://img.shields.io/badge/status-M1.4%20fixes%20implemented-brightgreen.svg)](docs/design.md)
+[![status: 84% held-out success](https://img.shields.io/badge/status-84%25%20held--out%20success-brightgreen.svg)](docs/design.md)
 
 **A from-scratch PPO implementation (PyTorch, no RL library) for a PyBullet
 reaching task, with a hand-derived GAE bootstrap tested against an
-independent reference and a mutation check, multi-episode rollout collection
-with minibatched updates, and a workspace bound verified by sabotage.**
+independent reference, a tanh-squashed Gaussian policy verified against the
+PPO ratio identity, multi-episode rollout collection with minibatched
+updates, and a workspace bound verified by sabotage.**
 
-## Status
+## Result
 
-**M1.4 fixes the two end-to-end defects isolated in M1.3.** The policy now
-uses a tanh-squashed Gaussian instead of sampling an unbounded Gaussian and
-then clipping the action after computing its log-probability. The action
-actually stored in the rollout is therefore the same bounded action whose
-likelihood PPO re-scores; a ratio-identity test checks that
-`exp(log_pi_new(a) - log_pi_old(a)) == 1` before any optimizer step, including
-near saturated action bounds. The PyBullet target is now fixed-base, so the
-kinematically driven robot cannot shove it out of the workspace; the
-hand-coded oracle is required to solve all 100 deterministic seeds.
+On the full random-target task (target sampled uniformly from
+`[-1, 1] x [-1, 1]` each episode), a held-out evaluation of the trained
+policy — deterministic actions, frozen observation-normalizer statistics,
+50 episodes, seed 1000 — resolves **42/50 episodes (84%)**, mean reward
+-49.70 +/- 74.13. The variance is driven by two hard episodes (likely far
+corner targets); the other 48 cluster between roughly -40 and +7.
 
-Checkpointing is also evaluation-safe now: network weights, optimizer state,
-configuration, training progress, and observation-normalizer statistics are
-saved together. Evaluation restores those statistics, freezes them, and is
-deterministic by default (`--stochastic` is explicit). Legacy M0-M1.3
-network-only checkpoints are still loadable, but `src.evaluate` rejects them
-by default because their training normalization statistics were never saved.
-
-The seven historical M0-M1.2 training runs remain documented as negative
-results, but their held-out success percentages should **not** be treated as
-valid measurements of the trained policies: the old evaluator used fresh,
-frozen normalization statistics instead of the training statistics. No new
-claim of convergence is made here; the correct next experiment is a fresh
-M1.4 training run after this repaired implementation passes CI.
-
-## Milestones
-
-- **M0 — plumbing correct, tested, documented.** Fixed a broken import that
-  prevented the agent from being constructed at all, a module-invocation bug
-  that broke the documented entry point independently of that, a bug that
-  bootstrapped every truncated episode as if it had terminated (see
-  `docs/design.md` for the derivation and the test that pins it down), and
-  an observation-shape mismatch (7 values returned against a declared 6)
-  that only the test suite caught. Added observation normalization, a clamp
-  on the policy's log standard deviation, and 21 tests.
-- **M1 — multi-episode rollouts, minibatching, real training runs.**
-  Replaced the single-episode/full-batch update with a configurable rollout
-  buffer spanning multiple episodes (motivated by a real, documented
-  900-episode M0 run that showed no learning at all), with GAE correctly cut
-  at every episode boundary inside the buffer — pinned down by a dedicated
-  leak test, verified by sabotage. Found and fixed a real reward-accounting
-  bug in the rollout loop along the way (also test-caught, not
-  code-review-caught). Four real training runs later: one stable
-  configuration found, still not learning past a flat reward plateau; two
-  disproved hyperparameter fixes, disclosed rather than hidden.
-- **M1.1 — bound the workspace, verified by sabotage; the plateau
-  hypothesis it tested, disproved.** Added a hard clamp on the robot's
-  planar position (`WORKSPACE_LIMIT`), a real, kept fix for the
-  unbounded-runaway failure mode M1's collapsed runs hit. A full training run
-  with it tracked the unbounded run's flat plateau almost exactly, then got
-  *worse* in the final third — disproving the hypothesis that workspace
-  bounding was the plateau's cause. 29 tests total.
-- **M1.2 — test the training-budget hypothesis at 3x the budget,
-  disproved too (this milestone).** A full 9000-episode run (~4.37M
-  environment steps, 3x M1/M1.1's budget), otherwise identical to M1.1, was
-  split into thirds and fit with a trend line: mean reward and success rate
-  both came back flat-to-slightly-declining across the whole run, not
-  improving. The held-out success rate ticked up (2% → 6% → 8% across the
-  three runs) but that movement is within sampling noise at n=50 and does
-  not track the (larger, more reliable) training-curve trend, which shows no
-  improvement. A much larger budget (another order of magnitude) remains
-  untested and unruled-out.
-- **M1.4 — repair the end-to-end policy/environment/evaluation contract.**
-  Replaced post-hoc action clipping with a tanh-squashed Gaussian and corrected
-  the transformed log-probability, made the target static, added ratio-identity
-  sabotage coverage, made checkpoints restore observation normalization, made
-  evaluation deterministic by default, switched to head-specific PPO-style
-  orthogonal initialization, and added PPO diagnostics (KL, clip fraction,
-  entropy, gradient norm, policy std) to TensorBoard. Historical held-out
-  evaluations are explicitly marked non-comparable because their normalizer
-  statistics were not saved.
-
-## How it works
-
-`RobotReachEnv` (PyBullet, Gymnasium API) rewards the negative planar
-distance to a random target, with a bonus for reaching it. The "robot" is a
-fixed-base `r2d2.urdf` mesh whose base position/velocity is set directly
-rather than driven by joint torques or forces — see Limitations below for
-what that does and doesn't mean for any results trained on it.
-
-`PPOAgent` implements PPO from the ground up: a shared-trunk actor-critic
-network (`PolicyValueNetwork`), clipped surrogate policy loss, GAE advantage
-estimation, and entropy regularization. Updates run over a rollout buffer
-that can span several episodes (`--rollout-steps`, default 2048), shuffled
-into minibatches (`--minibatch-size`) across `--ppo-epochs` epochs. No RL
-library (Stable-Baselines3, RLlib, ...) is used for the algorithm itself —
-only PyTorch, Gymnasium (for the environment API) and PyBullet (for the
-physics).
+The training curve backs this up: chunked into ten 300-episode blocks, mean
+reward climbs from -172 in the first block to a stable -20 to -30 range by
+the back half of the run, with success rate rising alongside it. A linear
+fit over the ten chunks gives a positive slope (`r=0.649`).
 
 <p align="center">
-  <img src="assets/training_reward_m1_2.png" alt="M1.2 training curve: 50-episode rolling mean reward over 9000 real training episodes, three times the M1/M1.1 budget, dropping to roughly -900 within the first 1500 episodes and staying flat for the remaining 7500" width="700">
+  <img src="assets/training_reward_random_target.png" alt="Training reward on the full random-target task: the 50-episode rolling mean climbs from about -400 to about -25 within the first 200 episodes and stays there for the remaining 3000 episodes" width="700">
 </p>
 
-<p align="center"><sub>9000 real episodes, not a typo: three times the
-budget of every earlier run, run specifically to test whether more training
-was the missing ingredient. It wasn't — the curve is flat, not rising. See
-<a href="docs/design.md">docs/design.md</a> for the full story, including
-the M1 vs M1.1 comparison and the two earlier runs that collapsed into
-runaway trajectories instead of plateauing.</sub></p>
+<p align="center"><sub>Real training run, full random-target task, 3000
+episodes. See <a href="docs/design.md">docs/design.md</a> for the full
+numbers.</sub></p>
 
 <p align="center">
   <img src="assets/reaching_env.png" alt="RobotReachEnv rendered in PyBullet: the r2d2 stand-in robot and a red target marker on a checkered ground plane" width="600">
@@ -120,6 +42,55 @@ runaway trajectories instead of plateauing.</sub></p>
 The target is drawn as an enlarged red marker for visibility — the actual
 <code>sphere_small.urdf</code> collision/visual target is a few millimetres
 across at this scale and would not read as a dot in a screenshot.</sub></p>
+
+## How it works
+
+`RobotReachEnv` (PyBullet, Gymnasium API) rewards the negative planar
+distance to a random target, with a bonus for reaching it. The "robot" is a
+fixed-base `r2d2.urdf` mesh whose base position/velocity is set directly
+rather than driven by joint torques or forces — see Limitations below for
+what that does and doesn't mean for the results. The target is a
+fixed-base body too, so it is a static landmark rather than something the
+robot can physically shove out of place. The robot's planar position is
+clamped to a fixed workspace bound so that a bad policy's reward is capped
+rather than growing unboundedly worse the longer it drifts.
+
+`PPOAgent` implements PPO from the ground up: a shared-trunk actor-critic
+network (`PolicyValueNetwork`), a tanh-squashed diagonal Gaussian policy,
+clipped surrogate policy loss, GAE advantage estimation, and entropy
+regularization. Sampling, squashing into the environment's action bounds,
+and log-probability scoring (including the change-of-variables Jacobian
+correction) are computed consistently for the exact action returned to the
+caller, so the PPO importance ratio `exp(log_pi_new(a) - log_pi_old(a))` is
+provably 1.0 for every stored transition before any optimizer step — checked
+directly by a dedicated test, including near-saturated action bounds where a
+naive implementation would disagree.
+
+Updates run over a rollout buffer that can span several episodes
+(`--rollout-steps`, default 2048), shuffled into minibatches
+(`--minibatch-size`) across `--ppo-epochs` epochs; the GAE recursion is cut
+at every episode boundary inside the buffer so one episode's advantage never
+leaks into another's. Checkpoints save network weights, optimizer state,
+configuration, training progress, and observation-normalizer statistics
+together, so evaluation can restore and freeze the exact statistics used
+during training; evaluation is deterministic by default (`--stochastic` is
+explicit). No RL library (Stable-Baselines3, RLlib, ...) is used for the
+algorithm itself — only PyTorch, Gymnasium (for the environment API), and
+PyBullet (for the physics).
+
+Before spending a full training budget on the random-target task, a cheap
+fixed-target overfit diagnostic (one static goal, a few hundred episodes)
+is a useful sanity check that the whole pipeline can learn at all: on this
+implementation it converges cleanly, reward climbing from around -350 to
+around -15 over the first ~230 of 500 episodes, and a held-out evaluation on
+that fixed goal resolves 50/50.
+
+<p align="center">
+  <img src="assets/training_reward_fixed_target.png" alt="Fixed-target overfit diagnostic: episode reward climbing smoothly from about -350 to about -15 over 230 episodes on a single static goal, then staying converged for the rest of the 500-episode run" width="500">
+</p>
+
+<p align="center"><sub>The cheaper diagnostic run: a single fixed goal, 500
+episodes, 50/50 held-out at convergence.</sub></p>
 
 ## Installation
 
@@ -131,10 +102,10 @@ pip install -r requirements.txt
 
 ## Quick start
 
-Run everything as a module, from the repository root — see `docs/design.md`
-for why `python src/train.py` (the natural-looking command) does not work.
-The hyperparameters below are the actual M1 run's (see `docs/design.md` for
-why these specific values, and which ones were tried and rejected):
+Run everything as a module, from the repository root (`python src/train.py`
+does not work — running a script directly puts `src/` itself on `sys.path`,
+not the repository root, so `from src.x import y` has nothing to resolve
+against):
 
 ```sh
 python -m src.train --num-episodes 3000 --lr 1e-4 --rollout-steps 2048 --minibatch-size 64
@@ -150,37 +121,36 @@ python -m src.train --num-episodes 500 --fixed-target 0.6 0.4 --output-dir exper
 ```
 src/
 ├── environment/    reaching_env.py — the PyBullet/Gymnasium environment
-├── agent/          ppo.py — the PPO agent (multi-episode rollout buffer, GAE, minibatched clipped update)
+├── agent/          ppo.py — the PPO agent (tanh-squashed Gaussian policy, multi-episode rollout buffer, GAE, minibatched clipped update)
 ├── network/        policy_value.py — shared-trunk actor-critic network
 ├── utils/          running_normalizer.py — running observation normalization
 ├── train.py        training entry point + collect_rollout (python -m src.train)
 └── evaluate.py      evaluation entry point (python -m src.evaluate)
 
-tests/              39 tests: GAE reference + multi-episode leak + mutation
-                    checks, rollout collection bookkeeping, network clamp,
-                    agent smoke tests, environment terminated/truncated
-                    contract + workspace bound, running normalizer
-docs/design.md      what was found, what was fixed, what was tried and
-                    reverted, and why — including all seven M1/M1.1/M1.2
-                    training runs
+tests/              39 tests: GAE reference + multi-episode leak + sabotage
+                    checks, PPO ratio-identity invariant, rollout collection
+                    bookkeeping, network initialization, agent smoke tests,
+                    environment terminated/truncated contract + workspace
+                    bound, a hand-coded oracle solvability check, running
+                    normalizer
+docs/design.md      architecture and design rationale
 conftest.py         empty; exists only so pytest puts the repo root on
                     sys.path (see docs/design.md)
 experiments/        checkpoints and TensorBoard logs land here at runtime
-assets/             reaching_env.png, training_reward_m1.png,
-                    training_reward_m1_1_comparison.png,
-                    training_reward_m1_2.png — real renders and real
-                    training data, not mockups (see docs/design.md)
+assets/             reaching_env.png, training_reward_fixed_target.png,
+                    training_reward_random_target.png — real renders and
+                    real training data, not mockups
 ```
 
 ## Limitations
 
 Stated here rather than left to be discovered.
 
-- **The agent does not reliably solve the task yet.** 2-8% success rate
-  across seven real training runs, no improving trend in any of them —
-  including a run 3x longer than the rest. See `docs/design.md` for the full
-  story, including three tested-and-disproved hypotheses and what is left
-  untested (a much larger training budget, or a non-budget explanation).
+- **The task is not solved outright.** 84% held-out success (42/50, seed
+  1000) on one 3000-episode run is a real result, not a guarantee — 16% of
+  held-out episodes still fail, no second random-target run has been done to
+  check run-to-run variance (training is unseeded, see below), and 3000
+  episodes is still a modest budget by continuous-control standards.
 - **The reaching task is kinematic, not dynamic.** The robot's base
   position/velocity is set directly each step; gravity and rigid-body
   dynamics play no role. This is a 2D point-reaching problem with a robot
@@ -190,11 +160,9 @@ Stated here rather than left to be discovered.
   environment instance, serially.
 - **Training runs are not seeded.** `python -m src.train` does not accept a
   `--seed` (network init and environment randomness both vary freely between
-  runs); only `python -m src.evaluate` does. This is a real source of the
-  run-to-run spread visible in `docs/design.md`'s numbers (e.g. M1.2's first
-  3000 episodes averaging noticeably worse than M1.1's, despite identical
-  hyperparameters) and is worth fixing before comparing any future run
-  against these ones too closely.
+  runs); only `python -m src.evaluate` does. Run-to-run spread on this task
+  is therefore expected and is worth accounting for before comparing any
+  future run against this one too closely.
 
 ## References
 

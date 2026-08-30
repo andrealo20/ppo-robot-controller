@@ -4,13 +4,9 @@ Run as a module from the repository root so the `src` package resolves:
 
     python -m src.train --num-episodes 1000
 
-M1 update: the agent now collects a fixed-size rollout (`--rollout-steps`)
-that can span several episodes back to back, instead of updating once per
-single episode. See docs/design.md, "Multi-episode rollouts", for why: the
-M0-era single-episode/full-batch update showed no clear improving trend over
-900 real training episodes, and this is the fix that was already flagged in
-the README's M1 scope as something to revisit *if* sample efficiency turned
-out to need it.
+The agent collects a fixed-size rollout (`--rollout-steps`) that can span
+several episodes back to back, then runs multiple epochs of minibatched PPO
+updates on it.
 """
 
 import argparse
@@ -36,12 +32,7 @@ def collect_rollout(env, agent, state, num_steps, episode_reward=0.0):
             mid-episode (whenever rollout_steps isn't a multiple of the
             episode length, which is the common case), and the reward
             accumulated so far for that episode would otherwise be silently
-            dropped -- caught by
-            tests/test_collect_rollout.py::test_ongoing_episode_state_
-            carries_over_between_calls, which fails on exactly that number
-            (an in-progress episode's reward truncated to whatever was
-            collected only in the *second* call) if this isn't threaded
-            through.
+            dropped.
 
     Returns:
         next_state: the observation to resume from on the *next* call (the
@@ -203,8 +194,7 @@ def build_arg_parser():
         type=int,
         default=64,
         help="Minibatch size within each rollout update. 0 disables "
-        "minibatching (one full-batch gradient step per epoch, the M0 "
-        "behaviour).",
+        "minibatching (one full-batch gradient step per epoch).",
     )
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-4)

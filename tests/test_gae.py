@@ -1,39 +1,32 @@
 """GAE / bootstrap correctness tests.
 
-Two bugs are pinned down here, both found by comparing against a hand-derived
-reference (written independently of PPOAgent's own recursion, not copied from
-it) rather than by reading the code and agreeing with it.
+Every result here is checked against a hand-derived reference implementation
+(written independently of PPOAgent's own recursion, not copied from it)
+rather than by reading the code and agreeing with it. Two contracts matter
+in particular:
 
-1. The original repository bug (M0): every episode ended by timing out
-   (RobotReachEnv only sets `terminated` on success), but the training loop
-   always passed `next_value=0.0` into the update, and the buffer stored a
-   single `done` flag that conflated termination with truncation. Both
-   effects forced every truncated rollout to bootstrap as if the episode had
-   truly ended, biasing the value target low on every single update.
+1. Termination and truncation must bootstrap differently: a terminated
+   episode bootstraps with 0.0, while a truncated one bootstraps with the
+   value estimate for the state the rollout was cut off at.
 
-2. The multi-episode rollout bug this design invites, if you are not careful
-   (M1): once a single buffer can hold several episodes back to back (see
-   docs/design.md, "Multi-episode rollouts"), the GAE recursion must be cut
-   at *every* episode boundary inside the buffer, not just at the last
-   transition -- otherwise one episode's advantage silently leaks backward
-   into the previous episode's, through the `gae` accumulator.
+2. A single buffer can hold several episodes back to back, so the GAE
+   recursion must be cut at *every* episode boundary inside the buffer, not
+   just at the last transition -- otherwise one episode's advantage would
+   leak backward into the previous episode's through the `gae` accumulator.
    `test_second_episode_does_not_leak_into_first` pins that down with a
-   4-transition, 2-episode buffer where the leak (if present) changes a
-   number that has nothing to do with the second episode.
+   4-transition, 2-episode buffer where a leak would change a number that
+   has nothing to do with the second episode.
 
-A consequence of (2) worth spelling out because it changes what the
-`next_value` argument means relative to M0: `next_value` (passed to
-`compute_returns_and_advantages`/`update`) is now used *only* when the last
+A consequence of (2) worth spelling out: the `next_value` argument passed to
+`compute_returns_and_advantages`/`update` is used *only* when the last
 buffer transition does not itself end an episode -- i.e. the rollout was cut
 off purely because the buffer's step budget ran out, mid-episode. If the
 buffer's last transition *is* an episode boundary (terminated or truncated),
 the bootstrap comes from that transition's own `boundary_value` (computed by
 the caller at collection time, exactly like every other episode boundary in
-the buffer), and `next_value` is ignored. `test_next_value_is_ignored_at_an_
-episode_boundary` pins that contract down explicitly.
-
-See docs/design.md for the full derivation and the numbers these tests were
-built from.
+the buffer), and `next_value` is ignored.
+`test_next_value_is_ignored_at_an_episode_boundary` pins that contract down
+explicitly.
 """
 
 import math
@@ -137,11 +130,10 @@ def test_matches_hand_derived_reference(terminated_last, boundary_value):
 
 
 def test_truncation_and_termination_give_different_bootstrap():
-    """The M0 bug this pins down: a real implementation MUST treat these
-    differently. A version that (like the original code) always bootstraps
-    with 0.0 regardless of why the episode ended would make this fail, since
-    the two rollouts are identical except for the final terminated flag and
-    the boundary value.
+    """A correct implementation MUST treat these differently. A version that
+    always bootstraps with 0.0 regardless of why the episode ended would
+    make this fail, since the two rollouts are identical except for the
+    final terminated flag and the boundary value.
     """
     agent_terminated = make_agent()
     load_two_step_episode(agent_terminated, terminated_last=True)

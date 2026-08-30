@@ -70,8 +70,7 @@ def test_step_budget_truncates_not_terminates(env, monkeypatch):
 
 
 def test_robot_cannot_drift_outside_the_workspace(env, monkeypatch):
-    """The M1.1 fix (see docs/design.md, 'M1.1: bounding the workspace'):
-    without this, sustained maximal action lets the robot travel roughly
+    """Sustained maximal action lets the robot travel roughly
     0.0083 m/step * 500 steps ~= 4.2 m from the origin -- well past
     WORKSPACE_LIMIT. Running the maximal action for a full episode must
     never push the observed robot position past the bound on either axis.

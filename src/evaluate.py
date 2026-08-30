@@ -20,9 +20,9 @@ def evaluate(
 ):
     """Evaluate without adapting observation statistics.
 
-    New checkpoints restore the exact running mean/variance used during
-    training. Legacy network-only checkpoints are rejected by default because
-    their normalizer statistics were never saved and therefore cannot be
+    Checkpoints restore the exact running mean/variance used during
+    training. A bare network-only checkpoint is rejected by default because
+    its normalizer statistics were never saved and therefore cannot be
     evaluated under the original input transformation.
     """
     env = NormalizeObservation(
@@ -35,7 +35,7 @@ def evaluate(
     if not metadata["normalizer_restored"]:
         message = (
             "checkpoint does not contain observation-normalizer statistics; "
-            "a faithful evaluation is impossible for legacy M0-M1.3 models"
+            "a faithful evaluation is impossible for a network-only checkpoint"
         )
         if not allow_legacy_checkpoint:
             env.close()

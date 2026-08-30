@@ -9,8 +9,7 @@ every episode (worst case ~1.41 m away needs roughly 170 steps at top
 speed).
 
 If this test fails, the problem is in the environment/reward/termination
-contract itself, not in anything PPO does -- see docs/design.md for why this
-was added (Andrea's review flagged that this diagnostic was missing).
+contract itself, not in anything PPO does.
 """
 
 import numpy as np

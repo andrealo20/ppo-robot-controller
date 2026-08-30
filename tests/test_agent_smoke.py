@@ -1,11 +1,4 @@
-"""End-to-end smoke tests for PPOAgent.
-
-test_agent_can_be_constructed alone would have caught the repository's
-original bug: `from .network import PolicyValueNetwork` inside
-src/agent/ppo.py resolved to the nonexistent module src.agent.network, so
-PPOAgent.__init__ raised ModuleNotFoundError before doing anything else.
-Nothing in the repository ever exercised that line.
-"""
+"""End-to-end smoke tests for PPOAgent."""
 
 import numpy as np
 from gymnasium import spaces

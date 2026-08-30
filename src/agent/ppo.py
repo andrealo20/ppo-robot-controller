@@ -296,7 +296,7 @@ class PPOAgent:
         torch.save(checkpoint, Path(path))
 
     def load(self, path, observation_rms=None, load_optimizer: bool = False) -> dict:
-        """Load checkpoint; legacy network-only ``state_dict`` files still work."""
+        """Load a checkpoint; a bare network ``state_dict`` file also works."""
         payload = torch.load(Path(path), map_location=self.device)
         if isinstance(payload, dict) and "network_state_dict" in payload:
             self.network.load_state_dict(payload["network_state_dict"])
@@ -317,7 +317,7 @@ class PPOAgent:
                 "legacy": False,
             }
 
-        # M0-M1.3 compatibility: those checkpoints contained only state_dict.
+        # Bare state_dict, with no normalizer/optimizer/config alongside it.
         self.network.load_state_dict(payload)
         return {
             "checkpoint_version": 0,

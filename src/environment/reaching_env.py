@@ -18,12 +18,10 @@ SUCCESS_BONUS = 10.0
 # ~0.0083 m/step, so a policy that is even moderately consistent in one bad
 # direction can travel ~4.2 m over a full 500-step episode -- roughly 3x
 # farther than the target's own [-1, 1] x [-1, 1] sampling range ever
-# requires. That mismatch is the diagnosed cause of the M1 training
-# instability documented in docs/design.md ("M1: a reward plateau, a
-# runaway hypothesis..."): a bad-but-consistent policy's reward keeps
+# requires. Left unbounded, a bad-but-consistent policy's reward keeps
 # growing worse, unboundedly, the longer it persists, rather than settling
-# at some fixed (if bad) value the way a bounded workspace would force it
-# to. 1.5 gives 50% headroom over the target's own range -- enough that the
+# at some fixed (if bad) value the way a bounded workspace forces it to.
+# 1.5 gives 50% headroom over the target's own range -- enough that the
 # robot is never blocked from approaching a target near the edge of its
 # sampling range, while still capping how far a bad policy can be punished
 # for drifting.
@@ -146,8 +144,7 @@ class RobotReachEnv(gym.Env):
         # target was reached); `truncated` means it ended only because the
         # step budget ran out. The distinction matters downstream: a PPO agent
         # should bootstrap the value of a truncated episode from the network,
-        # but not from a terminated one -- see PPOAgent.update() and
-        # docs/design.md for what conflating the two used to cause here.
+        # but not from a terminated one -- see PPOAgent.update().
         terminated = bool(distance < SUCCESS_DISTANCE)
         truncated = bool(self.step_count >= MAX_STEPS and not terminated)
 
@@ -156,13 +153,6 @@ class RobotReachEnv(gym.Env):
     def _get_observation(self):
         """Get current observation: robot (x, y), target (x, y), planar
         displacement (x, y) -- six components, matching observation_space.
-
-        The displacement used to be the full 3D vector (target_pos - robot_pos
-        with no slicing), which made this method return 7 values against a
-        6-element observation_space with nothing ever catching the mismatch
-        at runtime -- Gymnasium's Box space does not itself validate the
-        shape of what step()/reset() return. Caught by
-        tests/test_env.py::test_reset_returns_correctly_shaped_observation.
         """
         robot_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
         target_pos, _ = p.getBasePositionAndOrientation(self.target_id)
