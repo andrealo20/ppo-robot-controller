@@ -10,9 +10,11 @@ updates on it.
 """
 
 import argparse
+from collections import deque
 from pathlib import Path
 
 import numpy as np
+import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from src.agent.ppo import PPOAgent
@@ -94,6 +96,15 @@ def collect_rollout(env, agent, state, num_steps, episode_reward=0.0):
 def train(config):
     """Train PPO agent."""
 
+    # Seed NumPy (also governs PPOAgent.update's minibatch shuffling) and
+    # PyTorch (network initialization and action sampling) before anything
+    # that consumes randomness is constructed, so a given seed reproduces a
+    # given run end to end. Left unseeded (None) by default.
+    seed = config.get("seed")
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
     # Setup
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -112,18 +123,62 @@ def train(config):
         config=config,
     )
 
-    state, _ = env.reset()
+    # Seeding the first reset is enough for full env determinism: Gymnasium's
+    # Env.reset(seed=...) stores the seeded RNG on the instance, and every
+    # later unseeded reset() call (inside collect_rollout) keeps drawing from
+    # that same, already-seeded generator.
+    state, _ = env.reset(seed=seed)
     episode_reward_carry = 0.0
     total_steps = 0
     total_episodes = 0
-    best_reward = -np.inf
     num_updates = config["num_episodes"] * 500 // config["rollout_steps"] + 1
+
+    # Model selection uses a rolling mean over the most recent
+    # `best_model_window` completed episodes rather than any single episode's
+    # reward: each episode targets a different random goal, so one lucky
+    # (easy, nearby) target can otherwise look like the "best" policy purely
+    # by chance rather than by skill.
+    window = config.get("best_model_window", 20)
+    recent_rewards = deque(maxlen=window)
+    best_rolling_mean = -np.inf
 
     for update_idx in range(num_updates):
         state, next_value, episode_rewards, episode_reward_carry = collect_rollout(
             env, agent, state, config["rollout_steps"], episode_reward_carry
         )
         total_steps += config["rollout_steps"]
+
+        # Record completed-episode rewards and save the policy that actually
+        # produced them -- this has to happen *before* agent.update() below,
+        # which changes the network weights in place. Saving after the
+        # update would checkpoint a different policy than the one being
+        # scored.
+        for ep_reward in episode_rewards:
+            total_episodes += 1
+            recent_rewards.append(ep_reward)
+            if len(recent_rewards) == window:
+                rolling_mean = float(np.mean(recent_rewards))
+                if rolling_mean > best_rolling_mean:
+                    best_rolling_mean = rolling_mean
+                    agent.save(
+                        output_dir / "best_model.pt",
+                        observation_rms=env.rms,
+                        config=config,
+                        training_state={
+                            "total_steps": total_steps,
+                            "total_episodes": total_episodes,
+                            "update_idx": update_idx,
+                            "best_rolling_mean_reward": best_rolling_mean,
+                            "best_model_window": window,
+                        },
+                    )
+
+            if total_episodes % config["log_interval"] == 0:
+                print(
+                    f"Episode {total_episodes} (update {update_idx + 1}/{num_updates}) | "
+                    f"Reward: {ep_reward:.2f} | Steps: {total_steps}"
+                )
+            writer.add_scalar("reward/episode", ep_reward, total_episodes)
 
         metrics = agent.update(
             next_value,
@@ -132,29 +187,6 @@ def train(config):
         )
         for name, value in metrics.items():
             writer.add_scalar(f"ppo/{name}", value, update_idx + 1)
-
-        for ep_reward in episode_rewards:
-            total_episodes += 1
-            if ep_reward > best_reward:
-                best_reward = ep_reward
-                agent.save(
-                    output_dir / "best_model.pt",
-                    observation_rms=env.rms,
-                    config=config,
-                    training_state={
-                        "total_steps": total_steps,
-                        "total_episodes": total_episodes,
-                        "update_idx": update_idx + 1,
-                        "best_reward": best_reward,
-                    },
-                )
-
-            if total_episodes % config["log_interval"] == 0:
-                print(
-                    f"Episode {total_episodes} (update {update_idx + 1}/{num_updates}) | "
-                    f"Reward: {ep_reward:.2f} | Steps: {total_steps}"
-                )
-            writer.add_scalar("reward/episode", ep_reward, total_episodes)
 
         if (update_idx + 1) % config["checkpoint_interval"] == 0:
             agent.save(
@@ -165,7 +197,7 @@ def train(config):
                     "total_steps": total_steps,
                     "total_episodes": total_episodes,
                     "update_idx": update_idx + 1,
-                    "best_reward": best_reward,
+                    "best_rolling_mean_reward": best_rolling_mean,
                 },
             )
 
@@ -176,7 +208,8 @@ def train(config):
     writer.close()
     print(
         f"Training completed! Episodes: {total_episodes} | "
-        f"Updates: {update_idx + 1} | Best reward: {best_reward:.2f}"
+        f"Updates: {update_idx + 1} | Best {window}-episode rolling mean "
+        f"reward: {best_rolling_mean:.2f}"
     )
 
 
@@ -213,6 +246,20 @@ def build_arg_parser():
         metavar=("X", "Y"),
         default=None,
         help="Use one fixed target for a cheap PPO overfit diagnostic before full training.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed NumPy, PyTorch, and the environment for a reproducible run. "
+        "Unseeded by default.",
+    )
+    parser.add_argument(
+        "--best-model-window",
+        type=int,
+        default=20,
+        help="Number of most recent episodes averaged when deciding whether "
+        "to overwrite best_model.pt.",
     )
     return parser
 

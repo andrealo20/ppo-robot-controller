@@ -175,6 +175,17 @@ but `src.evaluate` rejects it for evaluation by default — pass
 explicitly. Evaluation uses the squashed policy mean (deterministic) by
 default; `--stochastic` opts into sampling instead.
 
+`best_model.pt` is saved as soon as a new best is found, *before* the
+rollout's PPO update runs — the network weights that produced a given
+episode's reward have to be the ones written to disk, not the weights one
+gradient step later. "Best" itself is a rolling mean over the most recent
+`--best-model-window` (default 20) completed episodes rather than any
+single episode's raw reward: with a different random target every episode,
+one easy (nearby) target can otherwise look like the best policy purely by
+chance. `model_updateN.pt` periodic snapshots are unambiguous either way —
+they are simply "the network after N updates" — so they save post-update as
+before.
+
 ### Training diagnostics
 
 Each PPO update returns and TensorBoard-logs policy loss, value loss, base
@@ -235,3 +246,21 @@ python -m src.train --num-episodes 3000 --lr 1e-4 --rollout-steps 2048 --minibat
 `PPOAgent`/`train.py` defaults and were not tuned beyond `lr`, which is
 lower than the common PPO literature default of `3e-4` — this task's action
 scale and reward magnitude made the lower rate the more stable choice.
+
+## Reproducibility
+
+`--seed` seeds NumPy (which also governs `PPOAgent.update`'s minibatch
+shuffling, since it calls `np.random.permutation` on the module-level RNG),
+PyTorch (network initialization and Gaussian action sampling both draw from
+its default generator), and the environment's own RNG via the first
+`env.reset(seed=...)` call — Gymnasium's `Env.reset` stores that seeded
+generator on the instance, so every later unseeded `reset()` inside
+`collect_rollout` keeps drawing from the same, already-seeded sequence.
+Passing the same `--seed` reproduces a run's episode rewards exactly.
+
+Run-to-run variance on the headline result was checked directly rather than
+assumed: a second full 3000-episode run (`--seed 2026`, otherwise identical
+hyperparameters) reaches **43/50 (86%)** held-out, versus the first run's
+42/50 (84%) — both training curves have the same shape (an early block mean
+around -130 to -170, settling to -25 to -30 by the back half, linear trend
+`r` around 0.64-0.65 across ten 300-episode chunks).

@@ -26,6 +26,11 @@ reward climbs from -172 in the first block to a stable -20 to -30 range by
 the back half of the run, with success rate rising alongside it. A linear
 fit over the ten chunks gives a positive slope (`r=0.649`).
 
+A second run with a different seed (`--seed 2026`, otherwise identical)
+confirms this isn't a one-off: **43/50 (86%)** held-out, same shape of
+training curve (first-block mean -137, stable at -25 to -30 by the back
+half, `r=0.640`).
+
 <p align="center">
   <img src="assets/training_reward_random_target.png" alt="Training reward on the full random-target task: the 50-episode rolling mean climbs from about -400 to about -25 within the first 200 episodes and stays there for the remaining 3000 episodes" width="700">
 </p>
@@ -108,13 +113,18 @@ not the repository root, so `from src.x import y` has nothing to resolve
 against):
 
 ```sh
-python -m src.train --num-episodes 3000 --lr 1e-4 --rollout-steps 2048 --minibatch-size 64
+python -m src.train --num-episodes 3000 --lr 1e-4 --rollout-steps 2048 --minibatch-size 64 --seed 42
 python -m src.evaluate --model-path experiments/checkpoints/best_model.pt --episodes 50 --seed 1000
 python -m pytest tests -q
 
 # Cheap overfit diagnostic on one fixed goal before a full run
 python -m src.train --num-episodes 500 --fixed-target 0.6 0.4 --output-dir experiments/fixed_target
 ```
+
+`--seed` seeds NumPy, PyTorch, and the environment for a reproducible run;
+omit it to train unseeded. `src.evaluate`'s own `--seed` is separate — it
+controls which held-out targets are sampled, independent of how the model
+being evaluated was trained.
 
 ## Repository layout
 
