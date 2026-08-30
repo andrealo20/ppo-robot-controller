@@ -504,3 +504,159 @@ real curves and disproved rather than shipped. What remains untested is a
 much larger budget (tens of millions of steps) and non-budget explanations
 (reward shaping, network capacity, action scale) -- see "M1.2: the
 training-budget hypothesis..." above for the full reasoning.
+
+## M1.3 (in progress): an independent code review found two real problems the training-curve analysis never could
+
+An external review of this repository (not by the author of the code above)
+proposed a specific, more convincing candidate than any of M1/M1.1/M1.2's
+three tested hypotheses: a likelihood-ratio inconsistency in
+`PPOAgent.select_action`/`store_transition`/`update`, plus several
+downstream problems (unsaved/unloaded observation-normalizer statistics
+making every held-out evaluation number unreliable, stochastic rather than
+deterministic evaluation, an unusually aggressive weight initialization, and
+a missing sanity check on whether the environment is solvable at all
+independent of PPO). It also flagged that this repository's public `main`
+branch never actually received the M1/M1.1/M1.2 source changes -- only the
+documentation did (see "Repository sync" below).
+
+Two of the proposed diagnostics were built and run against real code, not
+assumed. Both came back positive -- and one surfaced a second, previously
+unknown problem in the process.
+
+### Finding 1: the PPO ratio is not 1 before any gradient step, confirmed
+
+`select_action()` samples `action ~ Normal(mean, std)`, computes `log_prob`
+on that raw sampled action, then returns `np.clip(action, -1.0, 1.0)`. The
+*clipped* action is what `store_transition` stores and what `update()`
+later re-scores as `new_log_probs = dist.log_prob(actions)`; the *unclipped*
+action is what `old_log_probs` was computed from. PPO's ratio
+`exp(new_log_prob - old_log_prob)` is only meaningful when both sides score
+the same sampled value -- and here, whenever clipping fires, they don't.
+
+`tests/test_ppo_ratio_identity.py` checks this directly: before any
+optimizer step, with the network weights unchanged, the ratio for every
+stored transition must equal 1.0 (new and old log-probs are, by
+construction, the same distribution evaluated at the same point -- unless
+something silently changed what "the same point" means). With std tiny
+(`log_std = -10`, clipping essentially never fires), it does: `atol=1e-3`
+passes. With std at the trained ceiling (`log_std = 2.0`, matching
+`LOG_STD_MAX`, clipping firing on >50% of draws by construction of the
+test), it does not -- **ratios up to 473, 259, 38, 20, 19, 18, 15, 14, 12,
+11...** against values that should all read 1.0. `eps_clip=0.2` clips the
+surrogate objective to `[0.8, 1.2]`; a true ratio of 473 means the PPO
+update for that transition is being computed from a completely fictitious
+importance weight, saturated at the clip boundary in a way that carries no
+real information about how much the policy actually changed. Given
+`LOG_STD_MAX=2.0` was the *stable, shipped* configuration across all seven
+M1/M1.1/M1.2 training runs, and clipping is common whenever std is anywhere
+near that ceiling, this plausibly corrupted the PPO signal for a large
+fraction of the ~1.5-4.37M steps in every one of those runs -- a more
+convincing single explanation for the plateau than any of the three
+hypotheses tested and disproved above, because unlike those three, it
+doesn't require a separate story for why nothing else worked either.
+
+Not yet fixed in this pass -- documented and pinned down by a real, currently
+green test first, per this repository's own convention of testing a
+hypothesis before shipping a fix for it. The minimal correct fix: store the
+raw sampled action (and its log_prob) for training, and separately track the
+clipped `executed_action` sent to the environment, rather than conflating
+the two. A cleaner longer-term fix is a tanh-squashed Gaussian with the
+associated log-probability Jacobian correction, which removes the need for
+post-hoc clipping entirely; that is more invasive and is left for a
+follow-up pass once the minimal fix has been measured against a real run.
+
+### Finding 2: the target is not static -- the robot can physically shove it, and this was previously undocumented
+
+Investigating a second proposed diagnostic (a hand-coded "always move
+directly toward the target" oracle controller, with no PPO involved)
+surfaced something the review didn't anticipate either.
+`tests/test_oracle_policy.py` runs this oracle across 100 seeds: 95/100
+resolve, but 5 run out the full 500-step budget despite doing nothing but
+move at top speed toward the target the entire time.
+
+All five failures share the same signature: the robot's logged position is
+pinned at exactly +-1.5 (`WORKSPACE_LIMIT`) on one axis, and the target's
+logged position is *beyond* that same axis's bound -- e.g. seed 11: robot
+stuck at `x=-1.5`, target at `x=-1.81`, final distance 0.31 m, never closing
+further. Tracing seed 11 step by step shows why: the target starts at
+`x=-0.74` (inside the `[-1, 1]` sampling range, as expected), and drifts to
+`x=-1.81` over the course of the episode as the robot closes in -- not
+teleporting, moving, in the direction the robot is pushing from. This isn't
+limited to the five failures either: seed 0, a *successful* episode, shows
+the target drifting 0.72 m from its spawn point before the robot finally
+catches it.
+
+The cause: `target_id` is loaded via `p.loadURDF("sphere_small.urdf", ...)`
+with no `useFixedBase`, so it is a normal dynamic rigid body (mass 0.1 kg,
+confirmed via `p.getDynamicsInfo`) that PyBullet's physics can move on
+contact. The robot's collision geometry can contact the target's before the
+*base-to-base* distance this environment measures drops below
+`SUCCESS_DISTANCE`, and because the robot's velocity is force-set every
+single physics step via `resetBaseVelocity` regardless of what contact
+forces would normally do to it, contact with the target does not slow the
+robot down the way two colliding bodies normally would -- the robot behaves
+like an unstoppable moving wall, and the lightweight target absorbs the
+impulse instead, launching away from where it was placed. Combined with the
+M1.1 workspace bound, this compounds into the specific failure mode traced
+above: a target knocked past `WORKSPACE_LIMIT` becomes permanently
+unreachable, because the robot itself can never cross that same bound to
+follow it.
+
+This directly contradicts the environment's own documented assumption
+(`RobotReachEnv`'s docstring, and the README's Limitations section) that
+"gravity and rigid-body dynamics play no role in the task" -- true for the
+robot, false for the target. It also means every training and evaluation
+run to date has been chasing a target that moves in response to the
+approach itself, not the static point the reward function's distance
+calculation implicitly assumes. This is a plausible independent contributor
+to the plateau, on top of Finding 1 -- and, unlike Finding 1, it would
+affect a hand-coded oracle just as much as PPO, which is exactly what the
+oracle test caught.
+
+Not yet fixed in this pass, for the same reason as Finding 1: documented and
+pinned down by a real (currently red) test first. The most direct fix is
+giving the target zero mass or disabling collision between the target and
+the robot's collision shapes (a marker the robot passes through, not a
+physical obstacle) -- either removes the target's ability to be shoved, and
+either is a small, testable change against `tests/test_oracle_policy.py`
+before touching PPO training again.
+
+### Repository sync: the public main branch never received the M1/M1.1/M1.2 source changes
+
+Separately, the review also caught that this repository's GitHub `main`
+branch was out of sync in a specific and worse-than-generic way: `README.md`
+and this file were pushed and reflect the M1.2 state accurately, but
+`src/agent/ppo.py`, `src/environment/reaching_env.py`, and the rest of
+`src/` on `main` were still the original single-episode-update M0
+implementation -- no multi-episode rollout buffer, no minibatching, no
+`WORKSPACE_LIMIT`. Confirmed independently by fetching the files directly
+from `main` rather than trusting the report. A parallel `git status` check
+of the working local clone showed the same thing: it, too, was still on the
+M0 source with no local modifications to `src/` or `tests/` at all -- the
+source-level changes described in the M1/M1.1/M1.2 sections above were
+never actually applied outside the environment they were developed and
+tested in, only the documentation of them was. This is being corrected
+alongside this section, as its own sync rather than folded into the
+diagnostic commits above, so the commit that lands on `main` matching each
+milestone's description is the actual code that produced that milestone's
+results.
+
+### M1.3 status: two real problems found, neither fixed yet, both documented
+
+- `tests/test_ppo_ratio_identity.py` has one passing test and one failing
+  test, by design: the "clipping is rare" control case
+  (`test_ratio_is_one_when_std_is_small_and_clipping_is_rare`) passes,
+  confirming the harness itself is sound; the "clipping is common, matching
+  the trained configuration" case
+  (`test_ratio_is_one_when_std_is_large_and_clipping_is_common`) fails,
+  with ratios up to 473 recorded in the assertion output -- this is the
+  actual finding, not a broken test.
+- `tests/test_oracle_policy.py` is currently red: `95/100` against a
+  `>=95%` bar it should clear as a hand-coded, always-correct-direction
+  controller, and a slowest-resolved-episode assertion it fails outright
+  (500 steps, hitting the budget, against an expected ~170-step worst
+  case). This is an honest failing test, left failing rather than loosened,
+  because the underlying environment behavior is the real problem, not the
+  test's expectations.
+- Neither Finding 1 nor Finding 2 has been fixed yet. No new training run
+  has been launched pending a decision on fix order and priorities.

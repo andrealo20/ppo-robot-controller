@@ -3,8 +3,8 @@
 [![CI](https://github.com/andrealo20/ppo-robot-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/andrealo20/ppo-robot-controller/actions/workflows/ci.yml)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 [![language: Python 3.10+](https://img.shields.io/badge/language-Python%203.10%2B-blue.svg)](requirements.txt)
-[![tests: 29](https://img.shields.io/badge/tests-29-green.svg)](tests/)
-[![status: M1.2](https://img.shields.io/badge/status-M1.2-orange.svg)](docs/design.md)
+[![tests: 32, 2 red](https://img.shields.io/badge/tests-32%20(2%20red)-red.svg)](tests/)
+[![status: M1.3 investigating](https://img.shields.io/badge/status-M1.3%20investigating-red.svg)](docs/design.md)
 
 **A from-scratch PPO implementation (PyTorch, no RL library) for a PyBullet
 reaching task, with a hand-derived GAE bootstrap tested against an
@@ -12,6 +12,22 @@ independent reference and a mutation check, multi-episode rollout collection
 with minibatched updates, and a workspace bound verified by sabotage.**
 
 ## Status
+
+**Update, M1.3 (in progress):** an independent review of this repository
+found two real problems the three disproved hypotheses below never could:
+(1) `select_action()` computes the PPO log-probability on the raw sampled
+action but stores and later re-scores the *clipped* one -- confirmed by a
+new test that measures the PPO ratio before any gradient step and finds it
+should be 1.0 but reaches values up to 473 when std is at the trained
+ceiling; (2) the reaching target is a normal dynamic rigid body, not a
+fixed marker, and the kinematically-overridden robot can physically shove it
+out of reach on contact -- confirmed by a new hand-coded oracle-controller
+test that fails 5/100 seeds for exactly this reason, and shows target drift
+of up to 0.7m even in episodes that do succeed. The public GitHub `main`
+branch was also found to never have actually received the M1/M1.1/M1.2
+source changes (only the documentation did) -- being corrected alongside
+this update. See `docs/design.md`, "M1.3", for the full trace and numbers.
+Neither problem is fixed yet; no conclusions below account for them.
 
 Honestly not converged, across seven separate real training runs. Multi-episode
 rollouts, minibatching, and a hard workspace bound are all implemented and
