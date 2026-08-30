@@ -6,7 +6,7 @@
 [![tests: 39](https://img.shields.io/badge/tests-39-blue.svg)](tests/)
 [![status: 94.4% held-out success (5 seeds)](https://img.shields.io/badge/status-94.4%25%20held--out%20success%20(5%20seeds)-brightgreen.svg)](docs/design.md)
 
-**A from-scratch PPO implementation (PyTorch, no RL library) for a PyBullet
+**A Proximal Policy Optimization implementation (PyTorch, no RL library) for a PyBullet
 reaching task, with a hand-derived GAE bootstrap tested against an
 independent reference, a tanh-squashed Gaussian policy verified against the
 PPO ratio identity, multi-episode rollout collection with minibatched
