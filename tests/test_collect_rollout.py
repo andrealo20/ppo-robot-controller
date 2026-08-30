@@ -56,7 +56,7 @@ def test_collect_rollout_stores_exactly_num_steps():
     agent = make_agent()
     state, _ = env.reset()
 
-    next_state, next_value, episode_rewards, _carry = collect_rollout(
+    next_state, next_value, _episode_rewards, _carry = collect_rollout(
         env, agent, state, num_steps=10
     )
 
