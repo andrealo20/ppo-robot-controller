@@ -4,7 +4,7 @@
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 [![language: Python 3.10+](https://img.shields.io/badge/language-Python%203.10%2B-blue.svg)](requirements.txt)
 [![tests: 39](https://img.shields.io/badge/tests-39-blue.svg)](tests/)
-[![status: 84% held-out success](https://img.shields.io/badge/status-84%25%20held--out%20success-brightgreen.svg)](docs/design.md)
+[![status: 94.4% held-out success (5 seeds)](https://img.shields.io/badge/status-94.4%25%20held--out%20success%20(5%20seeds)-brightgreen.svg)](docs/design.md)
 
 **A from-scratch PPO implementation (PyTorch, no RL library) for a PyBullet
 reaching task, with a hand-derived GAE bootstrap tested against an
@@ -15,21 +15,34 @@ updates, and a workspace bound verified by sabotage.**
 ## Result
 
 On the full random-target task (target sampled uniformly from
-`[-1, 1] x [-1, 1]` each episode), a held-out evaluation of the trained
-policy — deterministic actions, frozen observation-normalizer statistics,
-50 episodes, seed 1000 — resolves **42/50 episodes (84%)**, mean reward
--49.70 +/- 74.13. The variance is driven by two hard episodes (likely far
-corner targets); the other 48 cluster between roughly -40 and +7.
+`[-1, 1] x [-1, 1]` each episode), performance is measured across **5
+independent training runs** (`--seed 0` through `--seed 4`, 3000 episodes
+each, otherwise identical hyperparameters) rather than a single run, each
+evaluated on the same held-out protocol (deterministic policy, frozen
+observation-normalizer statistics, 50 episodes, seed 1000):
+
+| seed | held-out success | mean reward |
+|---|---|---|
+| 0 | 46/50 (92%) | -30.01 +/- 37.45 |
+| 1 | 47/50 (94%) | -27.73 +/- 34.67 |
+| 2 | 47/50 (94%) | -28.40 +/- 37.17 |
+| 3 | 46/50 (92%) | -34.08 +/- 52.14 |
+| 4 | 50/50 (100%) | -22.08 +/- 19.63 |
+
+**Mean 94.4% +/- 3.3% held-out success across the 5 seeds** (pooled:
+236/250 episodes), with every individual seed at 92% or higher — the result
+holds consistently, not just on one lucky run. Raw per-seed numbers are in
+`results/seed_sweep_summary.csv`.
+
+<p align="center">
+  <img src="assets/seed_sweep_success_rate.png" alt="Bar chart of held-out success rate for training seeds 0 through 4: 92%, 94%, 94%, 92%, and 100%, with a dashed line at the 94.4% mean" width="620">
+</p>
 
 The training curve backs this up: chunked into ten 300-episode blocks, mean
-reward climbs from -172 in the first block to a stable -20 to -30 range by
-the back half of the run, with success rate rising alongside it. A linear
-fit over the ten chunks gives a positive slope (`r=0.649`).
-
-A second run with a different seed (`--seed 2026`, otherwise identical)
-confirms this isn't a one-off: **43/50 (86%)** held-out, same shape of
-training curve (first-block mean -137, stable at -25 to -30 by the back
-half, `r=0.640`).
+reward for a representative run climbs from -172 in the first block to a
+stable -20 to -30 range by the back half, with success rate rising
+alongside it. A linear fit over the ten chunks gives a positive slope
+(`r=0.649`); the other four runs show the same shape.
 
 <p align="center">
   <img src="assets/training_reward_random_target.png" alt="Training reward on the full random-target task: the 50-episode rolling mean climbs from about -400 to about -25 within the first 200 episodes and stays there for the remaining 3000 episodes" width="700">
@@ -147,19 +160,21 @@ docs/design.md      architecture and design rationale
 conftest.py         empty; exists only so pytest puts the repo root on
                     sys.path (see docs/design.md)
 experiments/        checkpoints and TensorBoard logs land here at runtime
+results/            seed_sweep_summary.csv — per-seed held-out results
+                    backing the table above
 assets/             reaching_env.png, training_reward_fixed_target.png,
-                    training_reward_random_target.png — real renders and
-                    real training data, not mockups
+                    training_reward_random_target.png,
+                    seed_sweep_success_rate.png — real renders and real
+                    training data, not mockups
 ```
 
 ## Limitations
 
 Stated here rather than left to be discovered.
 
-- **The task is not solved outright.** 84% held-out success (42/50, seed
-  1000) on one 3000-episode run is a real result, not a guarantee — 16% of
-  held-out episodes still fail, no second random-target run has been done to
-  check run-to-run variance (training is unseeded, see below), and 3000
+- **The task is not solved outright.** 94.4% +/- 3.3% held-out success
+  across 5 independent 3000-episode runs is a strong, checked result, not a
+  guarantee — the worst seed still fails 4/50 held-out episodes, and 3000
   episodes is still a modest budget by continuous-control standards.
 - **The reaching task is kinematic, not dynamic.** The robot's base
   position/velocity is set directly each step; gravity and rigid-body
@@ -168,11 +183,6 @@ Stated here rather than left to be discovered.
   be read as evidence about either.
 - **No parallel environments.** Rollouts are collected from a single
   environment instance, serially.
-- **Training runs are not seeded.** `python -m src.train` does not accept a
-  `--seed` (network init and environment randomness both vary freely between
-  runs); only `python -m src.evaluate` does. Run-to-run spread on this task
-  is therefore expected and is worth accounting for before comparing any
-  future run against this one too closely.
 
 ## References
 

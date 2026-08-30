@@ -259,8 +259,28 @@ generator on the instance, so every later unseeded `reset()` inside
 Passing the same `--seed` reproduces a run's episode rewards exactly.
 
 Run-to-run variance on the headline result was checked directly rather than
-assumed: a second full 3000-episode run (`--seed 2026`, otherwise identical
-hyperparameters) reaches **43/50 (86%)** held-out, versus the first run's
-42/50 (84%) — both training curves have the same shape (an early block mean
-around -130 to -170, settling to -25 to -30 by the back half, linear trend
-`r` around 0.64-0.65 across ten 300-episode chunks).
+assumed, with a systematic sweep over `--seed 0` through `--seed 4`, 3000
+episodes each, otherwise identical hyperparameters, each evaluated on the
+same held-out protocol (deterministic policy, frozen normalizer statistics,
+50 episodes, seed 1000):
+
+| seed | held-out success | mean reward |
+|---|---|---|
+| 0 | 46/50 (92%) | -30.01 +/- 37.45 |
+| 1 | 47/50 (94%) | -27.73 +/- 34.67 |
+| 2 | 47/50 (94%) | -28.40 +/- 37.17 |
+| 3 | 46/50 (92%) | -34.08 +/- 52.14 |
+| 4 | 50/50 (100%) | -22.08 +/- 19.63 |
+
+**Mean 94.4% +/- 3.3% held-out success** (population std 2.9%; pooled
+236/250 episodes across all 5 seeds). All five training curves share the
+same shape: an early-block (episodes 1-300) mean between -137 and -267,
+settling to roughly -20 to -30 by the back half of the run, with a positive
+linear trend (`r` in the 0.64-0.65 range across ten 300-episode chunks).
+Raw per-seed results are in `results/seed_sweep_summary.csv`, produced by
+`run_seed_sweep.sh` at the repository root, which trains and evaluates all
+5 seeds back to back with fresh output directories per seed.
+
+An earlier, smaller check (two runs, unseeded and `--seed 2026`, 84% and
+86% held-out respectively) pointed the same direction before the full sweep
+was run; the 5-seed sweep above supersedes it as the reported result.
