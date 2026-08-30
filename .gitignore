@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Training artifacts (checkpoints, TensorBoard logs) — reproducible from a
+# training run, not meant to be versioned.
+experiments/checkpoints/
+experiments/**/logs/
+*.pt
+*.pth
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
