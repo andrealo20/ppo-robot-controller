@@ -7,8 +7,18 @@ from torch import nn
 # is free to run away during training: it can grow until sampled actions are
 # almost pure noise, or collapse until the policy is numerically deterministic
 # and log-probability gradients blow up. -20/2 in log-space means std lands in
-# [exp(-20), exp(2)] ~= [2e-9, 7.4], which brackets anything a policy over
-# actions clipped to [-1, 1] should ever need while staying finite in float32.
+# [exp(-20), exp(2)] ~= [2e-9, 7.4].
+#
+# M1 training plateaued with log_std pinned at this 2.0 ceiling (std ~= 7.4,
+# far above the [-1, 1] action range) -- see docs/design.md, "M1: a reward
+# plateau, a runaway hypothesis, and a disproved fix". Both a smaller ceiling
+# (0.0, std <= 1.0) and a smaller entropy_coef were tried, expecting either to
+# help; both made training measurably *less* stable (faster, deeper
+# collapses into runaway trajectories), so LOG_STD_MAX is kept at its
+# original value here rather than "fixed" on a hypothesis that real training
+# runs disproved. The actual mechanism behind the plateau is now understood
+# to sit in the environment's reward/workspace design, not this clamp --
+# also in docs/design.md.
 LOG_STD_MIN = -20.0
 LOG_STD_MAX = 2.0
 

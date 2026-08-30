@@ -39,16 +39,24 @@ class PPOAgent:
 
         self.optimizer = optim.Adam(self.network.parameters(), lr=self.lr)
 
-        # Rollout buffer. `self.terminated` records, per stored transition,
-        # whether *that* transition ended the episode by resolving the task
-        # (as opposed to running out of the step budget) -- see
-        # compute_returns_and_advantages() for why the distinction matters.
+        # Rollout buffer. May span multiple episodes (see docs/design.md,
+        # "Multi-episode rollouts"): `episode_end[t]` is True whenever
+        # transition t is the LAST transition of its episode, for any reason
+        # (task resolved OR the environment's step budget ran out).
+        # `terminated[t]` narrows that further to "resolved" specifically --
+        # only meaningful when episode_end[t] is True. `boundary_value[t]` is
+        # the bootstrap value to use at a truncation boundary (V(next_state),
+        # computed by the caller at collection time); it is unused --
+        # ignored -- everywhere episode_end[t] is False or terminated[t] is
+        # True.
         self.states = []
         self.actions = []
         self.rewards = []
         self.values = []
         self.log_probs = []
         self.terminated = []
+        self.episode_end = []
+        self.boundary_value = []
 
     def select_action(self, state: np.ndarray) -> tuple[np.ndarray, float]:
         """Select action from current state.
@@ -72,78 +80,119 @@ class PPOAgent:
 
         return np.clip(action, -1.0, 1.0), log_prob
 
-    def store_transition(self, state, action, reward, value, log_prob, terminated):
+    def store_transition(
+        self,
+        state,
+        action,
+        reward,
+        value,
+        log_prob,
+        terminated,
+        truncated=False,
+        boundary_value=0.0,
+    ):
         """Store one environment transition in the rollout buffer.
 
         Args:
-            terminated: True only if this transition ended the episode by
-                resolving the task. A transition that ends the episode purely
+            terminated: True only if this transition ended its episode by
+                resolving the task. A transition that ends its episode purely
                 because the step limit was reached (Gymnasium's `truncated`)
-                must be stored as terminated=False -- the caller is
-                responsible for keeping the two apart, exactly as
+                must be passed here as terminated=False -- exactly as
                 env.step()'s (terminated, truncated) pair keeps them apart.
+            truncated: True only if this transition ended its episode by
+                running out of the step budget. `terminated` and `truncated`
+                must never both be True (Gymnasium's own contract).
+            boundary_value: Required (and only meaningful) when
+                truncated=True: V(the real next state), i.e. the critic's own
+                estimate of what happens after this transition, computed by
+                the caller *before* the environment is reset for the next
+                episode. Ignored when truncated=False.
         """
+        if terminated and truncated:
+            raise ValueError("a transition cannot be both terminated and truncated")
+
         self.states.append(state)
         self.actions.append(action)
         self.rewards.append(reward)
         self.values.append(value)
         self.log_probs.append(log_prob)
         self.terminated.append(terminated)
+        self.episode_end.append(terminated or truncated)
+        self.boundary_value.append(boundary_value if truncated else 0.0)
 
     def compute_returns_and_advantages(self, next_value):
-        """Compute returns and GAE advantages.
+        """Compute returns and GAE advantages over the whole rollout buffer.
+
+        The buffer may contain several episodes back to back (see
+        docs/design.md). At every `episode_end[t]`, the GAE recursion is cut
+        (the advantage of whatever episode comes after t must never leak
+        backward into t's episode) and the TD bootstrap is either 0.0 (a true
+        termination) or the precomputed `boundary_value[t]` (a truncation).
+        Everywhere else -- including the very last buffer transition, if its
+        episode is still ongoing -- behaves exactly like the original
+        single-episode recursion, bootstrapping from `next_value`.
 
         Args:
             next_value: Bootstrap value for the state *after* the last stored
-                transition. Must be 0.0 if the episode actually terminated
-                there, and V(next_state) (from the network) if it was only
-                truncated -- see PPOAgent.update() and docs/design.md.
+                transition, used only if that transition is not itself an
+                episode_end (i.e. the rollout was cut off mid-episode purely
+                because the buffer reached its step budget, not because the
+                episode ended). Ignored otherwise.
         """
         returns = []
         advantages = []
-        gae = 0
+        gae = 0.0
+        n = len(self.rewards)
 
-        values = self.values + [next_value]
-
-        for t in reversed(range(len(self.rewards))):
-            if t == len(self.rewards) - 1:
-                # Only the terminal flag of the *last* transition can ever be
-                # True in this single-episode rollout: every earlier stored
-                # transition is, by construction, mid-episode.
-                next_non_terminal = 1.0 - float(self.terminated[t])
-                next_value_t = next_value
-            else:
+        for t in reversed(range(n)):
+            if self.episode_end[t]:
+                bootstrap = 0.0 if self.terminated[t] else self.boundary_value[t]
+                next_non_terminal = 0.0 if self.terminated[t] else 1.0
+                gae_continues = 0.0  # always cut the recursion at an episode end
+            elif t == n - 1:
+                bootstrap = next_value
                 next_non_terminal = 1.0
-                next_value_t = self.values[t + 1]
+                gae_continues = 1.0
+            else:
+                bootstrap = self.values[t + 1]
+                next_non_terminal = 1.0
+                gae_continues = 1.0
 
             delta = (
                 self.rewards[t]
-                + self.gamma * next_value_t * next_non_terminal
-                - values[t]
+                + self.gamma * next_non_terminal * bootstrap
+                - self.values[t]
             )
-            gae = delta + self.gamma * self.gae_lambda * next_non_terminal * gae
+            gae = delta + self.gamma * self.gae_lambda * gae_continues * gae
 
             advantages.insert(0, gae)
-            returns.insert(0, gae + values[t])
+            returns.insert(0, gae + self.values[t])
 
         return torch.FloatTensor(returns), torch.FloatTensor(advantages)
 
-    def update(self, next_value, epochs=3):
-        """Update policy and value network.
+    def update(self, next_value, epochs=3, minibatch_size=None):
+        """Update policy and value network on the current rollout buffer.
 
         Args:
-            next_value: See compute_returns_and_advantages -- pass 0.0 if the
-                rollout ended in a true termination, or V(next_state) if it
-                ended only in a truncation.
+            next_value: See compute_returns_and_advantages.
+            epochs: Number of passes over the rollout.
+            minibatch_size: If given, each epoch shuffles the rollout and
+                splits it into minibatches of this size (the last one may be
+                smaller). If None (default), each epoch is a single full-batch
+                gradient step over the whole rollout -- the original M0
+                behaviour, kept as the default so existing single-episode
+                callers (and their tests) are unaffected.
         """
         # Compute returns and advantages
         returns, advantages = self.compute_returns_and_advantages(next_value)
 
-        # Normalize advantages. unbiased=False deliberately: torch's default
-        # (Bessel-corrected) std of a single-element tensor is 0/0 = NaN, with
-        # only a warning to say so -- a one-transition rollout (a legal, if
-        # unusual, edge case) would silently poison the whole update with
-        # NaNs. The biased std of one element is exactly 0, which + 1e-8
+        # Normalize advantages once, over the whole rollout, before any
+        # minibatching -- standard practice (splitting first would let small
+        # minibatches skew each other's normalization). unbiased=False
+        # deliberately: torch's default (Bessel-corrected) std of a
+        # single-element tensor is 0/0 = NaN -- a one-transition rollout (a
+        # legal, if unusual, edge case) would silently poison the whole
+        # update. The biased std of one element is exactly 0, which + 1e-8
         # leaves that one advantage at 0 after normalization: inert, not NaN.
         advantages = (advantages - advantages.mean()) / (
             advantages.std(unbiased=False) + 1e-8
@@ -156,40 +205,48 @@ class PPOAgent:
         returns = returns.to(self.device)
         advantages = advantages.to(self.device)
 
-        # PPO update
+        n = states.shape[0]
+        batch_size = n if minibatch_size is None else min(minibatch_size, n)
+
         for _ in range(epochs):
-            means, stds, values = self.network(states)
-
-            # Policy loss
-            dist = torch.distributions.Normal(means, stds)
-            new_log_probs = dist.log_prob(actions).sum(-1)
-            ratio = torch.exp(new_log_probs - old_log_probs)
-
-            surr1 = ratio * advantages
-            surr2 = (
-                torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+            indices = (
+                np.random.permutation(n) if minibatch_size is not None else np.arange(n)
             )
-            policy_loss = -torch.min(surr1, surr2).mean()
-
-            # Value loss
-            value_loss = ((values.squeeze() - returns) ** 2).mean()
-
-            # Entropy bonus
-            entropy = dist.entropy().sum(-1).mean()
-
-            # Total loss
-            loss = (
-                policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
-            )
-
-            # Optimization step
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)
-            self.optimizer.step()
+            for start in range(0, n, batch_size):
+                idx = indices[start : start + batch_size]
+                self._gradient_step(
+                    states[idx],
+                    actions[idx],
+                    old_log_probs[idx],
+                    returns[idx],
+                    advantages[idx],
+                )
 
         # Clear buffer
         self.clear_buffer()
+
+    def _gradient_step(self, states, actions, old_log_probs, returns, advantages):
+        """One PPO gradient step on a (mini)batch."""
+        means, stds, values = self.network(states)
+
+        dist = torch.distributions.Normal(means, stds)
+        new_log_probs = dist.log_prob(actions).sum(-1)
+        ratio = torch.exp(new_log_probs - old_log_probs)
+
+        surr1 = ratio * advantages
+        surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        value_loss = ((values.squeeze(-1) - returns) ** 2).mean()
+
+        entropy = dist.entropy().sum(-1).mean()
+
+        loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.network.parameters(), 0.5)
+        self.optimizer.step()
 
     def clear_buffer(self):
         """Clear rollout buffer."""
@@ -199,6 +256,8 @@ class PPOAgent:
         self.values.clear()
         self.log_probs.clear()
         self.terminated.clear()
+        self.episode_end.clear()
+        self.boundary_value.clear()
 
     def get_value(self, state: np.ndarray) -> float:
         """Get value estimate for state."""

@@ -9,7 +9,12 @@ run.
 import numpy as np
 import pytest
 
-from src.environment.reaching_env import MAX_STEPS, SUCCESS_DISTANCE, RobotReachEnv
+from src.environment.reaching_env import (
+    MAX_STEPS,
+    SUCCESS_DISTANCE,
+    WORKSPACE_LIMIT,
+    RobotReachEnv,
+)
 
 
 @pytest.fixture
@@ -62,6 +67,29 @@ def test_step_budget_truncates_not_terminates(env, monkeypatch):
     assert steps == MAX_STEPS
     assert terminated is False
     assert truncated is True
+
+
+def test_robot_cannot_drift_outside_the_workspace(env, monkeypatch):
+    """The M1.1 fix (see docs/design.md, 'M1.1: bounding the workspace'):
+    without this, sustained maximal action lets the robot travel roughly
+    0.0083 m/step * 500 steps ~= 4.2 m from the origin -- well past
+    WORKSPACE_LIMIT. Running the maximal action for a full episode must
+    never push the observed robot position past the bound on either axis.
+    The target is monkeypatched out of reach so the episode always runs the
+    full MAX_STEPS budget instead of ending early on a lucky success.
+    """
+    env.reset()
+    monkeypatch.setattr(env, "_distance_to_target", lambda: 5.0)
+    max_action = np.array([1.0, 1.0], dtype=np.float32)
+
+    terminated = truncated = False
+    obs = None
+    while not (terminated or truncated):
+        obs, _, terminated, truncated, _ = env.step(max_action)
+        robot_xy = obs[:2]
+        assert np.all(np.abs(robot_xy) <= WORKSPACE_LIMIT + 1e-6)
+
+    assert obs is not None
 
 
 def test_action_is_not_mutated_by_step(env):

@@ -12,6 +12,23 @@ MAX_STEPS = 500
 SUCCESS_DISTANCE = 0.1
 SUCCESS_BONUS = 10.0
 
+# Hard bound on the robot's planar workspace, in metres from the origin on
+# each axis. Without this, nothing stops the robot from drifting arbitrarily
+# far from the target: velocity = action * 2.0 m/s at 240 Hz means up to
+# ~0.0083 m/step, so a policy that is even moderately consistent in one bad
+# direction can travel ~4.2 m over a full 500-step episode -- roughly 3x
+# farther than the target's own [-1, 1] x [-1, 1] sampling range ever
+# requires. That mismatch is the diagnosed cause of the M1 training
+# instability documented in docs/design.md ("M1: a reward plateau, a
+# runaway hypothesis..."): a bad-but-consistent policy's reward keeps
+# growing worse, unboundedly, the longer it persists, rather than settling
+# at some fixed (if bad) value the way a bounded workspace would force it
+# to. 1.5 gives 50% headroom over the target's own range -- enough that the
+# robot is never blocked from approaching a target near the edge of its
+# sampling range, while still capping how far a bad policy can be punished
+# for drifting.
+WORKSPACE_LIMIT = 1.5
+
 
 class RobotReachEnv(gym.Env):
     """2D reaching task: reward is the negative distance to a random target.
@@ -89,6 +106,16 @@ class RobotReachEnv(gym.Env):
         # Simulation step
         p.stepSimulation()
         self.step_count += 1
+
+        # Clamp the robot back inside the workspace if it drifted past
+        # WORKSPACE_LIMIT on either axis -- see the constant's docstring for
+        # why this exists. Only rewritten when actually out of bounds, to
+        # avoid an extra resetBasePositionAndOrientation call on every normal
+        # step.
+        pos, orn = p.getBasePositionAndOrientation(self.robot_id)
+        clamped_xy = np.clip(pos[:2], -WORKSPACE_LIMIT, WORKSPACE_LIMIT)
+        if not np.array_equal(clamped_xy, pos[:2]):
+            p.resetBasePositionAndOrientation(self.robot_id, [*clamped_xy, pos[2]], orn)
 
         # Get observation, reward and the single planar distance both of them
         # depend on -- computed once so reward and termination can't disagree.
