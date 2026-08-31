@@ -170,8 +170,6 @@ assets/             reaching_env.png, training_reward_fixed_target.png,
 
 ## Limitations
 
-Stated here rather than left to be discovered.
-
 - **The task is not solved outright.** 94.4% +/- 3.3% held-out success
   across 5 independent 3000-episode runs is a strong, checked result, not a
   guarantee — the worst seed still fails 4/50 held-out episodes, and 3000
