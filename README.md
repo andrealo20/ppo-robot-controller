@@ -34,9 +34,6 @@ observation-normalizer statistics, 50 episodes, seed 1000):
 holds consistently, not just on one lucky run. Raw per-seed numbers are in
 `results/seed_sweep_summary.csv`.
 
-<p align="center">
-  <img src="assets/seed_sweep_success_rate.png" alt="Bar chart of held-out success rate for training seeds 0 through 4: 92%, 94%, 94%, 92%, and 100%, with a dashed line at the 94.4% mean" width="620">
-</p>
 
 The training curve backs this up: chunked into ten 300-episode blocks, mean
 reward for a representative run climbs from -172 in the first block to a
