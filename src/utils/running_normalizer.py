@@ -76,6 +76,16 @@ class NormalizeObservation(gym.ObservationWrapper):
         self.clip = clip
         self.update_stats = update_stats
 
+        # observation() rescales and then clips to [-clip, clip] in float32, so
+        # the wrapped space has to say so: inheriting the inner env's bounds and
+        # dtype would advertise a range this wrapper never emits.
+        self.observation_space = gym.spaces.Box(
+            low=-clip,
+            high=clip,
+            shape=env.observation_space.shape,
+            dtype=np.float32,
+        )
+
     def observation(self, observation: np.ndarray) -> np.ndarray:
         if self.update_stats:
             self.rms.update(observation[None, :])

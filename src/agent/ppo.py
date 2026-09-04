@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,17 @@ import numpy as np
 import torch
 from torch import optim
 
-from src.network.policy_value import PolicyValueNetwork
+from src.network.policy_value import LOG_STD_MAX, LOG_STD_MIN, PolicyValueNetwork
+
+# Below torch 2.6, torch.load defaults to unrestricted unpickling, so reading a
+# checkpoint of unknown provenance executes whatever code it carries. Every
+# checkpoint save() writes holds only tensors, dicts, lists and scalars, all of
+# which restricted unpickling handles, so weights_only=True costs nothing here.
+# The argument itself only exists from torch 1.13 on; older versions fall back
+# to the plain call rather than failing outright.
+_TORCH_LOAD_SUPPORTS_WEIGHTS_ONLY = (
+    "weights_only" in inspect.signature(torch.load).parameters
+)
 
 
 class PPOAgent:
@@ -89,15 +100,21 @@ class PPOAgent:
         entropy = dist.entropy().sum(-1)
         return log_probs, entropy, values
 
-    def select_action(
+    def select_action_and_value(
         self, state: np.ndarray, deterministic: bool = False
-    ) -> tuple[np.ndarray, float]:
-        """Return a bounded environment action and its matching log-probability."""
+    ) -> tuple[np.ndarray, float, float]:
+        """Return a bounded action, its log-probability, and V(state).
+
+        The network already produces the value estimate alongside the policy
+        distribution, so a rollout step that needs both should ask for both
+        here rather than calling select_action() and get_value() in sequence,
+        which runs the same forward pass twice on the same observation.
+        """
         with torch.no_grad():
             state_tensor = torch.as_tensor(
                 state, dtype=torch.float32, device=self.device
             ).unsqueeze(0)
-            dist, _ = self._distribution(state_tensor)
+            dist, value = self._distribution(state_tensor)
             raw_action = dist.mean if deterministic else dist.sample()
             action_tensor = self._squash(raw_action)
 
@@ -109,7 +126,14 @@ class PPOAgent:
                 action, dtype=torch.float32, device=self.device
             ).unsqueeze(0)
             log_prob = self._log_prob_from_dist(dist, returned_action).item()
-        return action, float(log_prob)
+        return action, float(log_prob), float(value.item())
+
+    def select_action(
+        self, state: np.ndarray, deterministic: bool = False
+    ) -> tuple[np.ndarray, float]:
+        """Return a bounded environment action and its matching log-probability."""
+        action, log_prob, _ = self.select_action_and_value(state, deterministic)
+        return action, log_prob
 
     def store_transition(
         self,
@@ -159,8 +183,14 @@ class PPOAgent:
                 - self.values[t]
             )
             gae = delta + self.gamma * self.gae_lambda * gae_continues * gae
-            advantages.insert(0, gae)
-            returns.insert(0, gae + self.values[t])
+            advantages.append(gae)
+            returns.append(gae + self.values[t])
+
+        # The loop walks the buffer backwards, so both lists come out reversed;
+        # appending and reversing once is linear, where insert(0, ...) per
+        # transition is quadratic in the rollout length.
+        advantages.reverse()
+        returns.reverse()
 
         return torch.tensor(returns, dtype=torch.float32), torch.tensor(
             advantages, dtype=torch.float32
@@ -253,7 +283,9 @@ class PPOAgent:
             "clip_fraction": clip_fraction.item(),
             "grad_norm": float(grad_norm.item()),
             "policy_std": float(
-                torch.exp(torch.clamp(self.network.log_std, -5.0, 1.0)).mean().item()
+                torch.exp(torch.clamp(self.network.log_std, LOG_STD_MIN, LOG_STD_MAX))
+                .mean()
+                .item()
             ),
         }
 
@@ -297,7 +329,10 @@ class PPOAgent:
 
     def load(self, path, observation_rms=None, load_optimizer: bool = False) -> dict:
         """Load a checkpoint; a bare network ``state_dict`` file also works."""
-        payload = torch.load(Path(path), map_location=self.device)
+        load_kwargs = (
+            {"weights_only": True} if _TORCH_LOAD_SUPPORTS_WEIGHTS_ONLY else {}
+        )
+        payload = torch.load(Path(path), map_location=self.device, **load_kwargs)
         if isinstance(payload, dict) and "network_state_dict" in payload:
             self.network.load_state_dict(payload["network_state_dict"])
             if load_optimizer and payload.get("optimizer_state_dict") is not None:

@@ -74,21 +74,35 @@ class RobotReachEnv(gym.Env):
         self._setup_physics()
 
     def _setup_physics(self):
-        """Initialize PyBullet physics engine."""
+        """Initialize PyBullet physics engine.
+
+        Every pybullet call in this class passes ``physicsClientId=self.client``
+        explicitly. PyBullet's module-level functions default to client 0, so
+        without it a second RobotReachEnv in the same process (two tests, or an
+        evaluation alongside training) would connect as client 1 but create and
+        drive its bodies inside client 0, next to the first environment's, and
+        close() would then disconnect an empty client 1 while leaving those
+        bodies behind.
+        """
         if self.client is None:
             mode = p.GUI if self.render_mode == "human" else p.DIRECT
             self.client = p.connect(mode)
-            p.setAdditionalSearchPath(pybullet_data.getDataPath())
-            p.setGravity(0, 0, -9.81)
+            p.setAdditionalSearchPath(
+                pybullet_data.getDataPath(), physicsClientId=self.client
+            )
+            p.setGravity(0, 0, -9.81, physicsClientId=self.client)
 
             # Load environment
-            self.plane_id = p.loadURDF("plane.urdf")
-            self.robot_id = p.loadURDF("r2d2.urdf", [0, 0, 1], useFixedBase=True)
+            self.plane_id = p.loadURDF("plane.urdf", physicsClientId=self.client)
+            self.robot_id = p.loadURDF(
+                "r2d2.urdf", [0, 0, 1], useFixedBase=True, physicsClientId=self.client
+            )
             self.target_id = p.loadURDF(
                 "sphere_small.urdf",
                 [1, 1, 1],
                 globalScaling=0.2,
                 useFixedBase=True,
+                physicsClientId=self.client,
             )
 
     def reset(self, seed=None, options=None):
@@ -105,10 +119,14 @@ class RobotReachEnv(gym.Env):
         else:
             target_xy = self.fixed_target
         target_pos = np.array([target_xy[0], target_xy[1], 1.0], dtype=np.float64)
-        p.resetBasePositionAndOrientation(self.target_id, target_pos, [0, 0, 0, 1])
+        p.resetBasePositionAndOrientation(
+            self.target_id, target_pos, [0, 0, 0, 1], physicsClientId=self.client
+        )
 
         # Robot reset
-        p.resetBasePositionAndOrientation(self.robot_id, [0, 0, 1], [0, 0, 0, 1])
+        p.resetBasePositionAndOrientation(
+            self.robot_id, [0, 0, 1], [0, 0, 0, 1], physicsClientId=self.client
+        )
 
         self.step_count = 0
         obs = self._get_observation()
@@ -118,10 +136,12 @@ class RobotReachEnv(gym.Env):
         """Execute one step."""
         # Apply action (simple velocity control)
         velocity = np.asarray(action) * 2.0
-        p.resetBaseVelocity(self.robot_id, velocity.tolist() + [0])
+        p.resetBaseVelocity(
+            self.robot_id, velocity.tolist() + [0], physicsClientId=self.client
+        )
 
         # Simulation step
-        p.stepSimulation()
+        p.stepSimulation(physicsClientId=self.client)
         self.step_count += 1
 
         # Clamp the robot back inside the workspace if it drifted past
@@ -129,10 +149,17 @@ class RobotReachEnv(gym.Env):
         # why this exists. Only rewritten when actually out of bounds, to
         # avoid an extra resetBasePositionAndOrientation call on every normal
         # step.
-        pos, orn = p.getBasePositionAndOrientation(self.robot_id)
+        pos, orn = p.getBasePositionAndOrientation(
+            self.robot_id, physicsClientId=self.client
+        )
         clamped_xy = np.clip(pos[:2], -WORKSPACE_LIMIT, WORKSPACE_LIMIT)
         if not np.array_equal(clamped_xy, pos[:2]):
-            p.resetBasePositionAndOrientation(self.robot_id, [*clamped_xy, pos[2]], orn)
+            p.resetBasePositionAndOrientation(
+                self.robot_id,
+                [*clamped_xy, pos[2]],
+                orn,
+                physicsClientId=self.client,
+            )
 
         # Get observation, reward and the single planar distance both of them
         # depend on -- computed once so reward and termination can't disagree.
@@ -154,8 +181,12 @@ class RobotReachEnv(gym.Env):
         """Get current observation: robot (x, y), target (x, y), planar
         displacement (x, y) -- six components, matching observation_space.
         """
-        robot_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-        target_pos, _ = p.getBasePositionAndOrientation(self.target_id)
+        robot_pos, _ = p.getBasePositionAndOrientation(
+            self.robot_id, physicsClientId=self.client
+        )
+        target_pos, _ = p.getBasePositionAndOrientation(
+            self.target_id, physicsClientId=self.client
+        )
 
         robot_xy = np.array(robot_pos[:2])
         target_xy = np.array(target_pos[:2])
@@ -172,8 +203,12 @@ class RobotReachEnv(gym.Env):
 
     def _distance_to_target(self):
         """Planar (x, y) distance between the robot and the target."""
-        robot_pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-        target_pos, _ = p.getBasePositionAndOrientation(self.target_id)
+        robot_pos, _ = p.getBasePositionAndOrientation(
+            self.robot_id, physicsClientId=self.client
+        )
+        target_pos, _ = p.getBasePositionAndOrientation(
+            self.target_id, physicsClientId=self.client
+        )
         return float(np.linalg.norm(np.array(robot_pos[:2]) - np.array(target_pos[:2])))
 
     def _compute_reward(self, distance):

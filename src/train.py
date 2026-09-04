@@ -18,7 +18,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from src.agent.ppo import PPOAgent
-from src.environment.reaching_env import RobotReachEnv
+from src.environment.reaching_env import MAX_STEPS, RobotReachEnv
 from src.utils.running_normalizer import NormalizeObservation
 
 
@@ -59,8 +59,7 @@ def collect_rollout(env, agent, state, num_steps, episode_reward=0.0):
     completed_episode_rewards = []
 
     for _ in range(num_steps):
-        action, log_prob = agent.select_action(state)
-        value = agent.get_value(state)
+        action, log_prob, value = agent.select_action_and_value(state)
 
         next_state, reward, terminated, truncated, _ = env.step(action)
         episode_reward += reward
@@ -131,7 +130,11 @@ def train(config):
     episode_reward_carry = 0.0
     total_steps = 0
     total_episodes = 0
-    num_updates = config["num_episodes"] * 500 // config["rollout_steps"] + 1
+    # Upper bound on the updates needed: MAX_STEPS is the longest an episode
+    # can run, so num_episodes * MAX_STEPS is the most transitions the target
+    # episode count can possibly cost. Episodes that resolve early finish the
+    # run sooner, via the num_episodes break at the bottom of the loop.
+    num_updates = config["num_episodes"] * MAX_STEPS // config["rollout_steps"] + 1
 
     # Model selection uses a rolling mean over the most recent
     # `best_model_window` completed episodes rather than any single episode's
@@ -230,7 +233,13 @@ def build_arg_parser():
         "minibatching (one full-batch gradient step per epoch).",
     )
     parser.add_argument("--ppo-epochs", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=1e-4,
+        help="Adam learning rate. The default is the value every published "
+        "result in the README was produced with.",
+    )
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--eps-clip", type=float, default=0.2)

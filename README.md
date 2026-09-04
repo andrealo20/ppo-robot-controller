@@ -135,9 +135,11 @@ python -m src.train --num-episodes 500 --fixed-target 0.6 0.4 --output-dir exper
 ```
 
 `--seed` seeds NumPy, PyTorch, and the environment for a reproducible run;
-omit it to train unseeded. `src.evaluate`'s own `--seed` is separate — it
-controls which held-out targets are sampled, independent of how the model
-being evaluated was trained.
+omit it to train unseeded. `src.evaluate`'s own `--seed` is separate from the
+training seed: it controls which held-out targets are sampled and seeds the
+evaluation process's NumPy and PyTorch generators (so that `--stochastic`
+runs repeat exactly), independent of how the model being evaluated was
+trained.
 
 ## Repository layout
 

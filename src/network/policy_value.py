@@ -58,7 +58,12 @@ class PolicyValueNetwork(nn.Module):
         features = self.shared(obs)
         mean = self.policy_head(features)
 
+        # log_std is state-independent, shape (action_dim,). Broadcasting it up
+        # to mean's shape has to work for a single unbatched observation, where
+        # mean is (action_dim,) too, as well as for a batch of shape
+        # (batch, action_dim); expand_as on an unconditionally unsqueezed
+        # (1, action_dim) fails in the unbatched case.
         log_std = torch.clamp(self.log_std, LOG_STD_MIN, LOG_STD_MAX)
-        std = torch.exp(log_std).unsqueeze(0).expand_as(mean)
+        std = torch.exp(log_std).expand_as(mean)
         value = self.value_head(features)
         return mean, std, value

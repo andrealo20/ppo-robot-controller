@@ -4,6 +4,7 @@ import argparse
 import warnings
 
 import numpy as np
+import torch
 
 from src.agent.ppo import PPOAgent
 from src.environment.reaching_env import RobotReachEnv
@@ -24,7 +25,15 @@ def evaluate(
     training. A bare network-only checkpoint is rejected by default because
     its normalizer statistics were never saved and therefore cannot be
     evaluated under the original input transformation.
+
+    ``seed`` fixes the whole protocol, not just the targets: it also seeds
+    NumPy and PyTorch, which is what makes ``--stochastic`` runs repeatable,
+    since those draw their actions from PyTorch's global generator.
     """
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
     env = NormalizeObservation(
         RobotReachEnv(render_mode="human" if render else None),
         update_stats=False,
@@ -86,7 +95,13 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", type=str, required=True)
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--render", action="store_true")
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Fix the held-out targets and seed NumPy and PyTorch, so that "
+        "--stochastic runs are reproducible too. Unseeded by default.",
+    )
     parser.add_argument(
         "--stochastic",
         action="store_true",
