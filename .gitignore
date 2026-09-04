@@ -9,7 +9,7 @@ __pycache__/
 .venv/
 venv/
 
-# Training artifacts (checkpoints, TensorBoard logs) — reproducible from a
+# Training artifacts (checkpoints, TensorBoard logs): reproducible from a
 # training run, not meant to be versioned.
 experiments/checkpoints/
 experiments/**/logs/

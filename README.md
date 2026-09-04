@@ -30,7 +30,7 @@ observation-normalizer statistics, 50 episodes, seed 1000):
 | 4 | 50/50 (100%) | -22.08 +/- 19.63 |
 
 **Mean 94.4% +/- 3.3% held-out success across the 5 seeds** (pooled:
-236/250 episodes), with every individual seed at 92% or higher — the result
+236/250 episodes), with every individual seed at 92% or higher, the result
 holds consistently, not just on one lucky run. Raw per-seed numbers are in
 `results/seed_sweep_summary.csv`.
 
@@ -57,7 +57,7 @@ numbers.</sub></p>
 </p>
 
 <p align="center"><sub>PyBullet render of a real reset of <code>RobotReachEnv</code>.
-The target is drawn as an enlarged red marker for visibility — the actual
+The target is drawn as an enlarged red marker for visibility, the actual
 <code>sphere_small.urdf</code> collision/visual target is a few millimetres
 across at this scale and would not read as a dot in a screenshot.</sub></p>
 
@@ -66,7 +66,7 @@ across at this scale and would not read as a dot in a screenshot.</sub></p>
 `RobotReachEnv` (PyBullet, Gymnasium API) rewards the negative planar
 distance to a random target, with a bonus for reaching it. The "robot" is a
 fixed-base `r2d2.urdf` mesh whose base position/velocity is set directly
-rather than driven by joint torques or forces — see Limitations below for
+rather than driven by joint torques or forces, see Limitations below for
 what that does and doesn't mean for the results. The target is a
 fixed-base body too, so it is a static landmark rather than something the
 robot can physically shove out of place. The robot's planar position is
@@ -80,7 +80,7 @@ regularization. Sampling, squashing into the environment's action bounds,
 and log-probability scoring (including the change-of-variables Jacobian
 correction) are computed consistently for the exact action returned to the
 caller, so the PPO importance ratio `exp(log_pi_new(a) - log_pi_old(a))` is
-provably 1.0 for every stored transition before any optimizer step — checked
+provably 1.0 for every stored transition before any optimizer step, checked
 directly by a dedicated test, including near-saturated action bounds where a
 naive implementation would disagree.
 
@@ -93,7 +93,7 @@ configuration, training progress, and observation-normalizer statistics
 together, so evaluation can restore and freeze the exact statistics used
 during training; evaluation is deterministic by default (`--stochastic` is
 explicit). No RL library (Stable-Baselines3, RLlib, ...) is used for the
-algorithm itself — only PyTorch, Gymnasium (for the environment API), and
+algorithm itself, only PyTorch, Gymnasium (for the environment API), and
 PyBullet (for the physics).
 
 Before spending a full training budget on the random-target task, a cheap
@@ -121,7 +121,7 @@ pip install -r requirements.txt
 ## Quick start
 
 Run everything as a module, from the repository root (`python src/train.py`
-does not work — running a script directly puts `src/` itself on `sys.path`,
+does not work, running a script directly puts `src/` itself on `sys.path`,
 not the repository root, so `from src.x import y` has nothing to resolve
 against):
 
@@ -145,10 +145,10 @@ trained.
 
 ```
 src/
-├── environment/    reaching_env.py — the PyBullet/Gymnasium environment
-├── agent/          ppo.py — the PPO agent (tanh-squashed Gaussian policy, multi-episode rollout buffer, GAE, minibatched clipped update)
-├── network/        policy_value.py — shared-trunk actor-critic network
-├── utils/          running_normalizer.py — running observation normalization
+├── environment/    reaching_env.py, the PyBullet/Gymnasium environment
+├── agent/          ppo.py, the PPO agent (tanh-squashed Gaussian policy, multi-episode rollout buffer, GAE, minibatched clipped update)
+├── network/        policy_value.py, shared-trunk actor-critic network
+├── utils/          running_normalizer.py, running observation normalization
 ├── train.py        training entry point + collect_rollout (python -m src.train)
 └── evaluate.py      evaluation entry point (python -m src.evaluate)
 
@@ -162,11 +162,11 @@ docs/design.md      architecture and design rationale
 conftest.py         empty; exists only so pytest puts the repo root on
                     sys.path (see docs/design.md)
 experiments/        checkpoints and TensorBoard logs land here at runtime
-results/            seed_sweep_summary.csv — per-seed held-out results
+results/            seed_sweep_summary.csv, per-seed held-out results
                     backing the table above
 assets/             reaching_env.png, training_reward_fixed_target.png,
                     training_reward_random_target.png,
-                    seed_sweep_success_rate.png — real renders and real
+                    seed_sweep_success_rate.png, real renders and real
                     training data, not mockups
 ```
 
@@ -176,12 +176,12 @@ Stated here rather than left to be discovered.
 
 - **The task is not solved outright.** 94.4% +/- 3.3% held-out success
   across 5 independent 3000-episode runs is a strong, checked result, not a
-  guarantee — the worst seed still fails 4/50 held-out episodes, and 3000
+  guarantee, the worst seed still fails 4/50 held-out episodes, and 3000
   episodes is still a modest budget by continuous-control standards.
 - **The reaching task is kinematic, not dynamic.** The robot's base
   position/velocity is set directly each step; gravity and rigid-body
   dynamics play no role. This is a 2D point-reaching problem with a robot
-  mesh on top, not a locomotion or manipulation task — nothing here should
+  mesh on top, not a locomotion or manipulation task, nothing here should
   be read as evidence about either.
 - **No parallel environments.** Rollouts are collected from a single
   environment instance, serially.
@@ -195,4 +195,4 @@ Stated here rather than left to be discovered.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
