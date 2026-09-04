@@ -243,9 +243,11 @@ python -m src.train --num-episodes 3000 --lr 1e-4 --rollout-steps 2048 --minibat
 
 `gamma=0.99`, `gae_lambda=0.95`, `eps_clip=0.2`, `value_coef=0.5`,
 `entropy_coef=0.01`, `max_grad_norm=0.5`, `ppo_epochs=4` are the
-`PPOAgent`/`train.py` defaults and were not tuned beyond `lr`, which is
-lower than the common PPO literature default of `3e-4` — this task's action
-scale and reward magnitude made the lower rate the more stable choice.
+`PPOAgent`/`train.py` defaults and were not tuned. `lr` was: it is the one
+hyperparameter moved off the common PPO literature value of `3e-4`, because
+this task's action scale and reward magnitude made the lower rate the more
+stable choice. `train.py` now defaults to the `1e-4` used here, so a run
+started without flags matches the protocol these numbers come from.
 
 ## Reproducibility
 

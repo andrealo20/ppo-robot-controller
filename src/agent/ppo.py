@@ -18,9 +18,16 @@ from src.network.policy_value import LOG_STD_MAX, LOG_STD_MIN, PolicyValueNetwor
 # which restricted unpickling handles, so weights_only=True costs nothing here.
 # The argument itself only exists from torch 1.13 on; older versions fall back
 # to the plain call rather than failing outright.
-_TORCH_LOAD_SUPPORTS_WEIGHTS_ONLY = (
-    "weights_only" in inspect.signature(torch.load).parameters
-)
+# inspect.signature raises for callables that carry no signature metadata, which
+# some builds expose for C-implemented functions. That would turn a capability
+# probe into an import-time crash, so an unreadable signature is treated as
+# "argument not available" rather than propagating.
+try:
+    _TORCH_LOAD_SUPPORTS_WEIGHTS_ONLY = (
+        "weights_only" in inspect.signature(torch.load).parameters
+    )
+except (TypeError, ValueError):  # pragma: no cover - build-dependent
+    _TORCH_LOAD_SUPPORTS_WEIGHTS_ONLY = False
 
 
 class PPOAgent:
